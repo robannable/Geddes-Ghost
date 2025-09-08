@@ -5,4 +5,5 @@ logs/
 history/
 students/
 debug_logs/
-venv/
+.venv/
+__pycache__/

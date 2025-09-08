@@ -302,8 +302,19 @@ def display_chunk_analysis(df):
 def display_response_times(df):
     st.subheader("Response Time Analysis")
     if 'time' in df.columns:
-        df['time'] = pd.to_datetime(df['time'], format='%H:%M:%S').dt.time
-        response_times = df.groupby(df['date'].dt.date)['time'].count().reset_index()
+        # Parse times robustly: coerce invalid strings to NaT, then fallback to mixed formats
+        times = pd.to_datetime(df['time'], format='%H:%M:%S', errors='coerce')
+        if times.isna().all():
+            # Fallback attempt without explicit format (lets pandas infer/mixed)
+            times = pd.to_datetime(df['time'], errors='coerce')
+        df['time'] = times.dt.time
+
+        # Only count rows with valid date and time
+        valid_mask = df['date'].notna() & df['time'].notna()
+        if valid_mask.any():
+            response_times = df.loc[valid_mask].groupby(df.loc[valid_mask, 'date'].dt.date)['time'].count().reset_index()
+        else:
+            response_times = pd.DataFrame({'date': [], 'time': []})
         
         fig = px.line(response_times,
                       x='date',
