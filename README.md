@@ -44,13 +44,13 @@ An interactive AI chatbot that simulates conversations with Patrick Geddes (1854
 
 6. Access the admin dashboard:
    ```bash
-   streamlit run admin_dashboard_temp.py
+   streamlit run admin_dashboard.py
    ```
 
 ## Project Structure
 
 - `geddesghost.py` - Main application file
-- `admin_dashboard_temp.py` - Analytics and monitoring dashboard
+- `admin_dashboard.py` - Analytics and monitoring dashboard
 - `logs/` - Directory for conversation logs
 - `documents/` - Source documents for context retrieval
 - `prompts/` - System prompts and templates
