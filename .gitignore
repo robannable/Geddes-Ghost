@@ -1,0 +1,8 @@
+.env
+.streamlit/
+.archived/
+logs/
+history/
+students/
+debug_logs/
+venv/
