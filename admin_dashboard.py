@@ -557,6 +557,242 @@ def create_user_analysis(df):
                         'variable': 'Metric'})
     st.plotly_chart(fig)
 
+def _extract_doc_name(score_str):
+    try:
+        return str(score_str).split('(')[0].strip()
+    except Exception:
+        return None
+
+def _infer_topics_from_docs(doc_names):
+    # Basic heuristic: use cleaned document base names as topics
+    topics = {}
+    for name in doc_names:
+        if not name:
+            continue
+        topic = os.path.splitext(os.path.basename(name))[0]
+        topics[name] = topic
+    return topics
+
+def _parse_topic_tags(value):
+    # Accept comma-separated or JSON-like list strings
+    try:
+        if isinstance(value, list):
+            return [str(v).strip() for v in value if str(v).strip()]
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned.startswith('[') and cleaned.endswith(']'):
+                try:
+                    return [str(v).strip().strip('"\'') for v in json.loads(cleaned)]
+                except Exception:
+                    pass
+            # fallback: comma-separated
+            return [t.strip() for t in cleaned.split(',') if t.strip()]
+    except Exception:
+        return []
+    return []
+
+def create_topics_map(df):
+    st.header("Topics Map")
+    # Collect document names from chunk score fields
+    doc_names = []
+    for col in ['chunk1_score', 'chunk2_score', 'chunk3_score']:
+        if col in df.columns:
+            doc_names.extend([_extract_doc_name(x) for x in df[col].dropna()])
+    doc_names = [d for d in doc_names if d]
+    if not doc_names and 'topic_tags' not in df.columns:
+        st.warning("No topic or document usage data available")
+        return
+
+    # Map documents to topics (or use provided topic_tags if available)
+    doc_to_topic = _infer_topics_from_docs(set(doc_names))
+
+    # Build per-row topic usage
+    usage_rows = []
+    for _, row in df.iterrows():
+        date_val = row.get('date')
+        if pd.isna(date_val):
+            continue
+        topics = []
+        # Prefer explicit topic tags if present
+        if 'topic_tags' in df.columns and pd.notna(row.get('topic_tags')):
+            topics = _parse_topic_tags(row.get('topic_tags'))
+        else:
+            for col in ['chunk1_score', 'chunk2_score', 'chunk3_score']:
+                val = row.get(col)
+                if pd.notna(val):
+                    doc = _extract_doc_name(val)
+                    topic = doc_to_topic.get(doc)
+                    if topic:
+                        topics.append(topic)
+        for topic in set(topics):
+            usage_rows.append({
+                'date': pd.to_datetime(date_val, errors='coerce').date() if pd.notna(date_val) else None,
+                'topic': topic
+            })
+
+    if not usage_rows:
+        st.info("No topic usage could be derived from data")
+        return
+
+    usage_df = pd.DataFrame(usage_rows)
+    usage_df = usage_df.dropna(subset=['date', 'topic'])
+
+    # Aggregate by week for a clearer heatmap
+    usage_df['week'] = pd.to_datetime(usage_df['date']).dt.to_period('W').apply(lambda r: r.start_time.date())
+    heat = usage_df.groupby(['topic', 'week']).size().reset_index(name='count')
+
+    if heat.empty:
+        st.info("Insufficient data for topics heatmap")
+        return
+
+    pivot = heat.pivot(index='topic', columns='week', values='count').fillna(0)
+    fig = px.imshow(pivot.values,
+                    labels=dict(x='Week', y='Topic', color='Count'),
+                    x=[str(c) for c in pivot.columns],
+                    y=list(pivot.index),
+                    aspect='auto',
+                    title='Topic Usage Heatmap (by week)')
+    st.plotly_chart(fig)
+
+    # Document contribution (if chunk scores available)
+    if doc_names:
+        doc_counts = pd.Series(doc_names).value_counts().reset_index()
+        doc_counts.columns = ['Document', 'Usage Count']
+        fig2 = px.bar(doc_counts.head(20), x='Document', y='Usage Count',
+                      title='Top Document Contributions',
+                      labels={'Document': 'Document', 'Usage Count': 'Times Used'})
+        st.plotly_chart(fig2)
+
+def _simple_sentiment(text):
+    if not isinstance(text, str) or not text.strip():
+        return 0
+    txt = text.lower()
+    positive = ['clear', 'understand', 'confident', 'helpful', 'insight', 'progress', 'good', 'improve']
+    negative = ['confused', 'unclear', 'stuck', 'difficult', 'frustrate', 'bad', 'worse', 'problem']
+    score = sum(w in txt for w in positive) - sum(w in txt for w in negative)
+    return score
+
+def _extract_keywords(text, top_k=15):
+    if not isinstance(text, str):
+        return []
+    stop = set(['the','and','for','with','that','this','from','into','over','about','your','their','into','when','how','what','why','are','was','were','will','would','could','should','have','has','had','on','in','of','to','a','an','as','it','its'])
+    words = re.findall(r"[a-zA-Z]{4,}", text.lower())
+    words = [w for w in words if w not in stop]
+    if not words:
+        return []
+    ser = pd.Series(words).value_counts().head(top_k)
+    return list(ser.items())
+
+def _extract_action_items(text):
+    if not isinstance(text, str):
+        return []
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    actions = []
+    patterns = [r"^(i will|i'll|next|plan|action|todo|we will)\b",
+                r"^[-*]\s+",
+                r"\bby (monday|tomorrow|next week|date)\b"]
+    for line in lines:
+        if any(re.search(p, line, re.IGNORECASE) for p in patterns):
+            actions.append(line)
+    return actions[:10]
+
+def create_reflections_analysis(df):
+    st.header("Reflections Analysis")
+    if 'reflection_text' not in df.columns and 'self_rating' not in df.columns:
+        st.warning("No reflections data available")
+        return
+
+    reflections = df['reflection_text'] if 'reflection_text' in df.columns else pd.Series(dtype=str)
+    ratings = df['self_rating'] if 'self_rating' in df.columns else pd.Series(dtype=float)
+
+    # Sentiment distribution
+    if not reflections.empty:
+        sent_scores = reflections.fillna("").apply(_simple_sentiment)
+        fig = px.histogram(sent_scores, nbins=11, title='Reflection Sentiment Distribution', labels={'value': 'Sentiment Score', 'count': 'Frequency'})
+        st.plotly_chart(fig)
+
+        # Top keywords
+        all_keywords = []
+        for txt in reflections.dropna().tolist():
+            all_keywords.extend([k for k,_ in _extract_keywords(txt, top_k=5)])
+        if all_keywords:
+            kw_counts = pd.Series(all_keywords).value_counts().reset_index()
+            kw_counts.columns = ['Keyword', 'Count']
+            fig2 = px.bar(kw_counts.head(20), x='Keyword', y='Count', title='Top Reflection Keywords')
+            st.plotly_chart(fig2)
+
+        # Action items aggregation
+        actions = []
+        for txt in reflections.dropna().tolist():
+            actions.extend(_extract_action_items(txt))
+        if actions:
+            st.subheader("Common Action Items")
+            for a in actions[:20]:
+                st.write(f"- {a}")
+
+    # Ratings distribution
+    if 'self_rating' in df.columns and df['self_rating'].notna().any():
+        fig3 = px.histogram(df['self_rating'].dropna(), nbins=5, title='Self-Ratings Distribution', labels={'value': 'Rating', 'count': 'Frequency'})
+        st.plotly_chart(fig3)
+
+def create_interventions(df):
+    st.header("Interventions (Suggested Teaching Plan)")
+    # Estimate topic gaps: high usage with lower average relevance score
+    topic_usage = {}
+    topic_scores = {}
+    for _, row in df.iterrows():
+        topics_here = []
+        for col in ['chunk1_score', 'chunk2_score', 'chunk3_score']:
+            val = row.get(col)
+            if pd.notna(val):
+                doc = _extract_doc_name(val)
+                topic = os.path.splitext(os.path.basename(doc))[0] if doc else None
+                # extract numeric score
+                try:
+                    score_part = str(val).split('(')[1].split(')')[0]
+                    score = float(score_part.split(':')[1].strip())
+                except Exception:
+                    score = None
+                if topic:
+                    topics_here.append((topic, score))
+        for topic, score in topics_here:
+            topic_usage[topic] = topic_usage.get(topic, 0) + 1
+            if score is not None:
+                topic_scores.setdefault(topic, []).append(score)
+
+    if not topic_usage:
+        st.info("Not enough data to generate interventions.")
+        return
+
+    topic_avg = {t: (np.mean(scores) if scores else 0) for t, scores in topic_scores.items()}
+    # Rank by usage high and score low
+    topics_rank = sorted(topic_usage.keys(), key=lambda t: ( -topic_usage.get(t,0), topic_avg.get(t,1)))
+
+    suggestions = []
+    for t in topics_rank[:10]:
+        usage = topic_usage.get(t, 0)
+        avg = topic_avg.get(t, np.nan)
+        if np.isnan(avg):
+            rationale = f"high interest (uses: {usage})"
+        else:
+            rationale = f"high interest (uses: {usage}) and lower grounding (avg score: {avg:.2f})"
+        suggestions.append(
+            f"Topic: {t}\n- Do: 10–15 min mini-lecture clarifying key concepts\n- Practice: Short applied exercise (3 prompts)\n- Resource: Link 2–3 key readings from documents mentioning {t}\n- Assessment: 3-question exit ticket\n- Rationale: {rationale}\n"
+        )
+
+    st.subheader("Suggested Priorities")
+    for s in suggestions[:5]:
+        st.write(s)
+
+    # Download plan
+    full_plan = "\n\n".join(suggestions)
+    st.download_button(
+        label="Download Teaching Plan (txt)",
+        data=full_plan.encode('utf-8'),
+        file_name="teaching_plan.txt",
+        mime="text/plain"
+    )
+
 def main():
     st.title("GeddesGhost Admin Dashboard")
     
@@ -572,8 +808,8 @@ def main():
         return
     
     # Create tabs for different analyses
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "Performance", "Document Usage", "User Analysis", "Response Metrics"
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+        "Performance", "Document Usage", "User Analysis", "Response Metrics", "Topics Map", "Reflections", "Interventions"
     ])
     
     with tab1:
@@ -587,6 +823,15 @@ def main():
     
     with tab4:
         display_response_metrics()
+
+    with tab5:
+        create_topics_map(df)
+
+    with tab6:
+        create_reflections_analysis(df)
+
+    with tab7:
+        create_interventions(df)
 
 if __name__ == "__main__":
     main()
