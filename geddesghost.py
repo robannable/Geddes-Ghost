@@ -892,7 +892,7 @@ if 'context_manager' not in st.session_state:
 
 if 'response_evaluator' not in st.session_state:
     logger.info("Initializing new ResponseEvaluator")
-    from admin_dashboard_temp import ResponseEvaluator
+    from admin_dashboard import ResponseEvaluator
     st.session_state.response_evaluator = ResponseEvaluator()
 
 # Streamlit UI
