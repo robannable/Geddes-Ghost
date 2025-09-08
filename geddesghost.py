@@ -939,6 +939,23 @@ if selected_provider != MODEL_CONFIG["current_provider"]:
     MODEL_CONFIG["current_provider"] = selected_provider
     st.sidebar.success(f"Switched to {selected_provider} model")
 
+# Sidebar: Data controls
+st.sidebar.header("Data Controls")
+if st.sidebar.button("Reload documents (RAG)"):
+    try:
+        # Clear caches to force reload
+        st.cache_data.clear()
+        st.cache_resource.clear()
+
+        # Reload documents and recompute TF-IDF
+        document_chunks_with_filenames = load_documents(['documents', 'history', 'students'])
+        vectorizer, tfidf_matrix = compute_tfidf_matrix(document_chunks_with_filenames)
+        st.sidebar.success("Documents reloaded and index recomputed.")
+        logger.info("RAG documents reloaded and TF-IDF recomputed via sidebar control")
+    except Exception as e:
+        st.sidebar.error(f"Reload failed: {str(e)}")
+        logger.error(f"RAG reload failed: {str(e)}")
+
 # Introduction section with image and personal introduction
 col1, col2 = st.columns([0.8, 3.2])
 with col1:
