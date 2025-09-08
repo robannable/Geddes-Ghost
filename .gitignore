@@ -7,3 +7,4 @@ students/
 debug_logs/
 .venv/
 __pycache__/
+documents/
