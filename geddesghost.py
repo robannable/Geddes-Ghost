@@ -1,25 +1,31 @@
 """
-Patrick Geddes AI Assistant System (PGAAS)
-----------------------------------------
-A Retrieval-Augmented Generation (RAG) implementation that simulates interactions
-with Patrick Geddes, the Scottish polymath. The system combines:
+GeddesGhost AI Assistant System
+--------------------------------
+A Retrieval-Augmented Generation (RAG) application that simulates interactions
+with Patrick Geddes, the Scottish polymath. The system currently includes:
 
-- RAG-based knowledge retrieval from multiple document sources
-- Dynamic cognitive modes with temperature variation (0.7-0.9)
-- Context-aware response generation using Llama 3.1 70B
-- Comprehensive logging and response evaluation
+- TF-IDF-based retrieval over `documents/`, `history/`, and `students/`
+- Dynamic cognitive modes with temperature variation (0.7–0.9)
+- Context-aware response generation via Anthropic Claude (default) or Ollama
+- Comprehensive logging and an Admin Dashboard for analytics
 
-The system processes user queries through three main document categories:
+Admin Dashboard views:
+1. Performance, Document Usage, User Analysis, Response Metrics
+2. Topics Map (topic heatmap and doc-to-topic contribution)
+3. Reflections (sentiment/keywords and action items)
+4. Interventions (auto-generated teaching plan)
+
+Document categories used for retrieval:
 1. Authoritative documents (core knowledge)
 2. Historical records (past interactions)
 3. Student-specific content (personalized context)
 
 Responses are generated using a structured context assembly process and
-cognitive mode selection system that mimics Geddes' teaching approach.
+cognitive mode selection system inspired by Geddes' teaching approach.
 
 Author: Rob Annable
-Last Updated: 05-11-2024
-Version: 1.0
+Last Updated: 08-09-2025
+Version: 1.1
 """
 
 import re
