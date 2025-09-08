@@ -1,0 +1,8 @@
+<em>Re-animating historical figures, or phoning a friend.</em>
+
+This project uses a Large Language Model (LLM) to simulate a conversation with a renowned historical figure. Responses are a combination of information present in the model's dataset plus chosen documents related to their work and associated texts, using Retrieval Augmented Generation (RAG) to fine tune the knowledge base.
+
+
+Available Models:
+- Anthropic Claude: A powerful language model for detailed, contextual responses
+- Ollama: A local model option for privacy-focused interactions
