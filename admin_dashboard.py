@@ -1027,8 +1027,7 @@ def create_temperature_analysis(df):
                         color='temperature_source',
                         title="Temperature vs Response Length",
                         labels={'actual_temperature': 'Temperature',
-                               'response_length': 'Response Length (words)'},
-                        trendline="lowess")
+                               'response_length': 'Response Length (words)'})
         st.plotly_chart(fig, use_container_width=True)
 
     with col2:
@@ -1055,8 +1054,7 @@ def create_temperature_analysis(df):
                            color='source',
                            title="Temperature vs Creative Markers",
                            labels={'temperature': 'Temperature',
-                                  'markers': 'Creative Markers Count'},
-                           trendline="lowess")
+                                  'markers': 'Creative Markers Count'})
             st.plotly_chart(fig, use_container_width=True)
 
     # Section 3: Auto vs Manual Comparison
