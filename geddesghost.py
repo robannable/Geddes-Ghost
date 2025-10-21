@@ -268,12 +268,15 @@ class ModelAPIHandler:
             logger.error(f"Error fetching Ollama models: {str(e)}")
             return []
 
-    def make_request(self, prompt, system_prompt=None):
+    def make_request(self, prompt, system_prompt=None, temperature=None):
+        # Use provided temperature or fall back to config default
+        effective_temperature = temperature if temperature is not None else self.provider_config["temperature"]
+
         if self.provider == "anthropic":
             payload = {
                 "model": self.provider_config["model"],
                 "max_tokens": self.provider_config["max_tokens"],
-                "temperature": self.provider_config["temperature"],
+                "temperature": effective_temperature,
                 "top_p": self.provider_config["top_p"],
                 "messages": [
                     {"role": "user", "content": prompt}
@@ -287,7 +290,7 @@ class ModelAPIHandler:
                 "prompt": f"{system_prompt}\n\n{prompt}" if system_prompt else prompt,
                 "stream": False,
                 "options": {
-                    "temperature": self.provider_config["temperature"],
+                    "temperature": effective_temperature,
                     "top_p": self.provider_config["top_p"],
                     "num_predict": self.provider_config["max_tokens"]
                 }
@@ -754,34 +757,44 @@ def assemble_enhanced_context(
     
     return rag_context
 
-def get_ai_response(user_name, prompt):
+def get_ai_response(user_name, prompt, manual_temperature=None):
     try:
         # Log the model being used
         current_provider = MODEL_CONFIG["current_provider"]
         current_model = MODEL_CONFIG["providers"][current_provider]["model"]
         logger.info(f"Using model: {current_provider} - {current_model}")
-        
+
         # Get document chunks and compute relevance
         weighted_similarities = weight_context_chunks(
-            prompt, 
+            prompt,
             document_chunks_with_filenames,
-            vectorizer, 
+            vectorizer,
             tfidf_matrix
         )
-        
+
         # Get top chunks based on weighted similarities
         top_indices = weighted_similarities.argsort()[-5:][::-1]  # Get top 5 chunks
         top_chunks = [document_chunks_with_filenames[i] for i in top_indices]
-        
+
         # Extract unique filenames from top chunks
         unique_files = list(set(filename for _, filename in top_chunks))
-        
+
         today_history = load_today_history()
         api_handler = ModelAPIHandler(MODEL_CONFIG)
-        
+
         # Get mode parameters with explicit mode handling
         mode_params = st.session_state.cognitive_modes.get_mode_parameters(prompt)
         selected_mode = mode_params.get('mode', 'survey')  # Default to survey if mode is missing
+
+        # Determine which temperature to use
+        if manual_temperature is not None:
+            effective_temperature = manual_temperature
+            temperature_source = "manual"
+            logger.info(f"Using manual temperature: {effective_temperature}")
+        else:
+            effective_temperature = mode_params['temperature']
+            temperature_source = f"auto ({selected_mode})"
+            logger.info(f"Using cognitive mode temperature: {effective_temperature} (mode: {selected_mode})")
         
         # Get enhanced context structure
         rag_context = assemble_enhanced_context(
@@ -814,7 +827,7 @@ def get_ai_response(user_name, prompt):
         """
 
         # Prepare API request with structured prompt and character prompt
-        response_json = api_handler.make_request(structured_prompt, system_prompt=character_prompt)
+        response_json = api_handler.make_request(structured_prompt, system_prompt=character_prompt, temperature=effective_temperature)
         
         # Handle different API response formats
         if api_handler.provider == "anthropic":
@@ -878,15 +891,22 @@ def get_ai_response(user_name, prompt):
         
         # Create chunk info with scores
         chunk_info = [
-            f"{filename} (score: {weighted_similarities[idx]:.4f})" 
+            f"{filename} (score: {weighted_similarities[idx]:.4f})"
             for idx, (_, filename) in enumerate(top_chunks)
         ]
-        
-        return (reasoning, answer), unique_files, chunk_info
+
+        # Return temperature info along with response
+        temperature_info = {
+            'temperature': effective_temperature,
+            'source': temperature_source,
+            'mode': selected_mode
+        }
+
+        return (reasoning, answer), unique_files, chunk_info, temperature_info
 
     except Exception as e:
         logger.error(f"Error in get_ai_response: {str(e)}")
-        return f"An unexpected error occurred: {str(e)}", [], []
+        return f"An unexpected error occurred: {str(e)}", [], [], {'temperature': 0.7, 'source': 'error', 'mode': 'unknown'}
 
 # Initialize session state objects
 if 'cognitive_modes' not in st.session_state:
@@ -939,6 +959,28 @@ if selected_provider != MODEL_CONFIG["current_provider"]:
     MODEL_CONFIG["current_provider"] = selected_provider
     st.sidebar.success(f"Switched to {selected_provider} model")
 
+# Temperature control section
+st.sidebar.header("Temperature Control")
+temperature_mode = st.sidebar.radio(
+    "Temperature Mode",
+    options=["Auto (Cognitive Mode)", "Manual"],
+    help="Auto uses temperature based on cognitive mode (Survey: 0.7, Synthesis: 0.8, Proposition: 0.9). Manual lets you set a custom temperature."
+)
+
+if temperature_mode == "Manual":
+    manual_temperature = st.sidebar.slider(
+        "Temperature",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.7,
+        step=0.05,
+        help="Higher values (0.8-1.0) = more creative/random. Lower values (0.0-0.5) = more focused/deterministic."
+    )
+    st.sidebar.caption(f"Current: {manual_temperature:.2f}")
+else:
+    manual_temperature = None
+    st.sidebar.caption("Temperature will be set automatically based on query type")
+
 # Sidebar: Data controls
 st.sidebar.header("Data Controls")
 if st.sidebar.button("Reload documents (RAG)"):
@@ -982,11 +1024,12 @@ if st.button('Submit'):
             try:
                 # Get the latest file paths
                 csv_file, json_file = initialize_log_files()
-                
+
                 # Get response and update logs
-                response_content, unique_files, chunk_info = get_ai_response(
-                    user_name_input.strip(), 
-                    prompt_input.strip()
+                response_content, unique_files, chunk_info, temperature_info = get_ai_response(
+                    user_name_input.strip(),
+                    prompt_input.strip(),
+                    manual_temperature=manual_temperature
                 )
                 
                 # Check for error messages in response
@@ -1063,11 +1106,14 @@ if st.button('Submit'):
                 st.markdown("""
                 <div class="metadata-section">
                     <p style="color: #666; margin-bottom: 5px;"><strong>📚 Sources:</strong> {}</p>
-                    <p style="color: #666; margin-bottom: 0;"><strong>🔍 Relevance:</strong> {}</p>
+                    <p style="color: #666; margin-bottom: 5px;"><strong>🔍 Relevance:</strong> {}</p>
+                    <p style="color: #666; margin-bottom: 0;"><strong>🌡️ Temperature:</strong> {} ({})</p>
                 </div>
                 """.format(
                     ' • '.join(html.escape(file) for file in unique_files),
-                    ' • '.join(html.escape(chunk) for chunk in chunk_info)
+                    ' • '.join(html.escape(chunk) for chunk in chunk_info),
+                    temperature_info['temperature'],
+                    html.escape(temperature_info['source'])
                 ), unsafe_allow_html=True)
                 
             except Exception as e:
