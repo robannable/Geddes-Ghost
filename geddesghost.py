@@ -540,23 +540,31 @@ def write_markdown_history(user_name, question, response, csv_file):
         f.write(f"**Model Used:** {current_provider} - {current_model}\n\n")
         f.write("---\n\n")
 
-def update_chat_logs(user_name, question, response, unique_files, chunk_info, csv_file, json_file):
+def update_chat_logs(user_name, question, response, unique_files, chunk_info, csv_file, json_file, temperature_info=None):
     """Update both CSV and JSON logs with chat data"""
     current_date = datetime.now().strftime("%Y-%m-%d")
     current_time = datetime.now().strftime("%H:%M:%S")
-    
-    # Get the current mode and model info
-    mode_params = st.session_state.cognitive_modes.get_mode_parameters(question)
-    current_mode = mode_params['mode']
-    temperature = mode_params['temperature']
+
+    # Use temperature_info if provided, otherwise fall back to cognitive mode detection
+    if temperature_info:
+        current_mode = temperature_info['mode']
+        temperature = temperature_info['temperature']
+        temperature_source = temperature_info['source']
+    else:
+        mode_params = st.session_state.cognitive_modes.get_mode_parameters(question)
+        current_mode = mode_params['mode']
+        temperature = mode_params['temperature']
+        temperature_source = "auto (legacy)"
+
     current_provider = MODEL_CONFIG["current_provider"]
     current_model = MODEL_CONFIG["providers"][current_provider]["model"]
-    
+
     # Get evaluation with accumulated metrics
     evaluation_results = st.session_state.response_evaluator.evaluate_response(
         response=response,
         mode=current_mode,
-        temperature=temperature
+        temperature=temperature,
+        temperature_source=temperature_source
     )
     
     # Prepare CSV row with full metrics
@@ -574,6 +582,9 @@ def update_chat_logs(user_name, question, response, unique_files, chunk_info, cs
         'response_length': evaluation_results['avg_response_length'],
         'creative_markers': str(evaluation_results['creative_markers_frequency']),
         'temperature': str(evaluation_results['temperature_effectiveness']),
+        'actual_temperature': temperature,  # The actual temperature used
+        'temperature_source': temperature_source,  # auto/manual
+        'detected_mode': current_mode,  # The cognitive mode detected/used
         'model_provider': current_provider,
         'model_name': current_model
     }
@@ -599,6 +610,8 @@ def update_chat_logs(user_name, question, response, unique_files, chunk_info, cs
         'chunk_info': chunk_info,
         'cognitive_mode': current_mode,
         'evaluation': evaluation_results,
+        'actual_temperature': temperature,
+        'temperature_source': temperature_source,
         'model_provider': current_provider,
         'model_name': current_model
     }
@@ -1071,7 +1084,8 @@ if st.button('Submit'):
                     unique_files=unique_files,
                     chunk_info=chunk_info,
                     csv_file=csv_file,
-                    json_file=json_file
+                    json_file=json_file,
+                    temperature_info=temperature_info
                 )
 
                 # Add this line to write markdown history
