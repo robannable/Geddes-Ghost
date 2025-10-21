@@ -59,7 +59,7 @@ run_geddesghost() {
 # Function to run the admin dashboard
 run_admin_dashboard() {
     echo -e "${GREEN}Starting Admin Dashboard...${NC}"
-    streamlit run admin_dashboard_temp.py
+    streamlit run admin_dashboard.py
 }
 
 # Main script
@@ -91,13 +91,13 @@ while true; do
             # Check if lxterminal is installed for Raspberry Pi
             if command_exists lxterminal; then
                 lxterminal -e "bash -c 'source .venv/bin/activate && streamlit run geddesghost.py'" &
-                lxterminal -e "bash -c 'source .venv/bin/activate && streamlit run admin_dashboard_temp.py'" &
+                lxterminal -e "bash -c 'source .venv/bin/activate && streamlit run admin_dashboard.py'" &
             else
                 echo "lxterminal is not installed. Installing..."
                 sudo apt-get update
                 sudo apt-get install -y lxterminal
                 lxterminal -e "bash -c 'source .venv/bin/activate && streamlit run geddesghost.py'" &
-                lxterminal -e "bash -c 'source .venv/bin/activate && streamlit run admin_dashboard_temp.py'" &
+                lxterminal -e "bash -c 'source .venv/bin/activate && streamlit run admin_dashboard.py'" &
             fi
             ;;
         4)
