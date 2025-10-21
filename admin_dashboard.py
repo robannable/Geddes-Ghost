@@ -46,42 +46,65 @@ class ResponseEvaluator:
                 'speculative_proposition': 0,
                 'cross-disciplinary': 0
             },
-            'temperature_effectiveness': {0.7: [], 0.8: [], 0.9: []}
+            'temperature_data': [],  # List of {temp, length, markers, mode, source} dicts
+            'temperature_effectiveness': {}  # Dynamic temperature tracking
         }
         logger.info("ResponseEvaluator initialized")
     
-    def evaluate_response(self, response: str, mode: str, temperature: float) -> dict:
+    def evaluate_response(self, response: str, mode: str, temperature: float, temperature_source: str = "auto") -> dict:
         # Update mode distribution
         self.metrics['mode_distribution'][mode] = self.metrics['mode_distribution'].get(mode, 0) + 1
-        
+
         # Update response length
         response_length = len(response.split())
         self.metrics['response_lengths'].append(response_length)
-        
-        # Update temperature effectiveness
-        if temperature in self.metrics['temperature_effectiveness']:
-            self.metrics['temperature_effectiveness'][temperature].append(response_length)
-        
-        # Analyze for creative markers
+
+        # Count creative markers in this response
         lower_response = response.lower()
+        current_markers = 0
+
         if any(word in lower_response for word in ['like', 'as', 'metaphor', 'akin']):
             self.metrics['creative_markers']['metaphor'] += 1
+            current_markers += 1
         if any(word in lower_response for word in ['ecology', 'nature', 'environment', 'organic']):
             self.metrics['creative_markers']['ecological_reference'] += 1
+            current_markers += 1
         if any(word in lower_response for word in ['could', 'might', 'suggest', 'propose']):
             self.metrics['creative_markers']['speculative_proposition'] += 1
+            current_markers += 1
         if any(word in lower_response for word in ['across', 'between', 'integrate', 'combine']):
             self.metrics['creative_markers']['cross-disciplinary'] += 1
-        
+            current_markers += 1
+
+        # Calculate word complexity (average word length)
+        words = response.split()
+        avg_word_length = sum(len(w) for w in words) / len(words) if words else 0
+
+        # Store comprehensive temperature data
+        temp_data_point = {
+            'temperature': temperature,
+            'length': response_length,
+            'markers': current_markers,
+            'mode': mode,
+            'source': temperature_source,
+            'word_complexity': avg_word_length
+        }
+        self.metrics['temperature_data'].append(temp_data_point)
+
+        # Update temperature effectiveness tracking (dynamic)
+        if temperature not in self.metrics['temperature_effectiveness']:
+            self.metrics['temperature_effectiveness'][temperature] = []
+        self.metrics['temperature_effectiveness'][temperature].append(response_length)
+
         # Calculate averages for temperature effectiveness
         temp_effectiveness = {
             temp: sum(lengths) / len(lengths) if lengths else 0
             for temp, lengths in self.metrics['temperature_effectiveness'].items()
         }
-        
+
         return {
             'mode_distribution': self.metrics['mode_distribution'],
-            'avg_response_length': sum(self.metrics['response_lengths']) / len(self.metrics['response_lengths']),
+            'avg_response_length': sum(self.metrics['response_lengths']) / len(self.metrics['response_lengths']) if self.metrics['response_lengths'] else 0,
             'creative_markers_frequency': dict(self.metrics['creative_markers']),
             'temperature_effectiveness': temp_effectiveness
         }
@@ -793,6 +816,193 @@ def create_interventions(df):
         mime="text/plain"
     )
 
+def create_temperature_analysis(df):
+    """Comprehensive temperature analysis tab"""
+    st.header("Temperature Analysis")
+
+    # Check if we have temperature data
+    if 'actual_temperature' not in df.columns or 'temperature_source' not in df.columns:
+        st.warning("Temperature tracking data not available. Please use the system with the updated version to collect this data.")
+        return
+
+    # Clean the data
+    temp_df = df[['actual_temperature', 'temperature_source', 'response_length',
+                   'detected_mode', 'creative_markers', 'date']].copy()
+    temp_df = temp_df.dropna(subset=['actual_temperature'])
+
+    if temp_df.empty:
+        st.info("No temperature data available yet. Start using the system to collect data.")
+        return
+
+    # Convert temperature to float
+    temp_df['actual_temperature'] = pd.to_numeric(temp_df['actual_temperature'], errors='coerce')
+    temp_df = temp_df.dropna(subset=['actual_temperature'])
+
+    # Section 1: Temperature Distribution
+    st.subheader("1. Temperature Distribution")
+    col1, col2 = st.columns(2)
+
+    with col1:
+        # Overall distribution
+        fig = px.histogram(temp_df, x='actual_temperature', nbins=20,
+                          title="Temperature Distribution",
+                          labels={'actual_temperature': 'Temperature', 'count': 'Frequency'},
+                          color='temperature_source',
+                          barmode='overlay')
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col2:
+        # Auto vs Manual breakdown
+        mode_counts = temp_df['temperature_source'].value_counts().reset_index()
+        mode_counts.columns = ['Mode', 'Count']
+        fig = px.pie(mode_counts, values='Count', names='Mode',
+                    title="Auto vs Manual Mode Usage")
+        st.plotly_chart(fig, use_container_width=True)
+
+    # Section 2: Temperature vs Response Characteristics
+    st.subheader("2. Temperature Impact on Response Characteristics")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        # Temperature vs Response Length
+        fig = px.scatter(temp_df, x='actual_temperature', y='response_length',
+                        color='temperature_source',
+                        title="Temperature vs Response Length",
+                        labels={'actual_temperature': 'Temperature',
+                               'response_length': 'Response Length (words)'},
+                        trendline="lowess")
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col2:
+        # Creative markers analysis
+        marker_data = []
+        for idx, row in temp_df.iterrows():
+            try:
+                markers_str = row.get('creative_markers', '{}')
+                if isinstance(markers_str, str) and markers_str.strip():
+                    markers_dict = eval(markers_str.strip())
+                    if isinstance(markers_dict, dict):
+                        total_markers = sum(markers_dict.values())
+                        marker_data.append({
+                            'temperature': row['actual_temperature'],
+                            'markers': total_markers,
+                            'source': row['temperature_source']
+                        })
+            except:
+                continue
+
+        if marker_data:
+            marker_df = pd.DataFrame(marker_data)
+            fig = px.scatter(marker_df, x='temperature', y='markers',
+                           color='source',
+                           title="Temperature vs Creative Markers",
+                           labels={'temperature': 'Temperature',
+                                  'markers': 'Creative Markers Count'},
+                           trendline="lowess")
+            st.plotly_chart(fig, use_container_width=True)
+
+    # Section 3: Auto vs Manual Comparison
+    st.subheader("3. Auto vs Manual Mode Comparison")
+
+    auto_data = temp_df[temp_df['temperature_source'].str.contains('auto', case=False, na=False)]
+    manual_data = temp_df[temp_df['temperature_source'] == 'manual']
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.metric("Auto Mode Responses", len(auto_data))
+        if not auto_data.empty:
+            st.metric("Avg Temperature", f"{auto_data['actual_temperature'].mean():.2f}")
+            st.metric("Avg Length", f"{auto_data['response_length'].mean():.0f} words")
+
+    with col2:
+        st.metric("Manual Mode Responses", len(manual_data))
+        if not manual_data.empty:
+            st.metric("Avg Temperature", f"{manual_data['actual_temperature'].mean():.2f}")
+            st.metric("Avg Length", f"{manual_data['response_length'].mean():.0f} words")
+
+    with col3:
+        if not auto_data.empty and not manual_data.empty:
+            temp_diff = manual_data['actual_temperature'].mean() - auto_data['actual_temperature'].mean()
+            length_diff = manual_data['response_length'].mean() - auto_data['response_length'].mean()
+            st.metric("Temperature Difference", f"{temp_diff:+.2f}")
+            st.metric("Length Difference", f"{length_diff:+.0f} words")
+
+    # Section 4: Temperature Trends Over Time
+    st.subheader("4. Temperature Trends Over Time")
+
+    if 'date' in temp_df.columns:
+        temp_df['date'] = pd.to_datetime(temp_df['date'], errors='coerce')
+        temp_df_sorted = temp_df.sort_values('date').dropna(subset=['date'])
+
+        if not temp_df_sorted.empty:
+            fig = px.line(temp_df_sorted, x='date', y='actual_temperature',
+                         color='temperature_source',
+                         title="Temperature Usage Over Time",
+                         labels={'date': 'Date', 'actual_temperature': 'Temperature'})
+            st.plotly_chart(fig, use_container_width=True)
+
+    # Section 5: Temperature Effectiveness Matrix
+    st.subheader("5. Temperature Effectiveness Matrix")
+
+    # Create temperature bins
+    temp_df['temp_range'] = pd.cut(temp_df['actual_temperature'],
+                                    bins=[0, 0.3, 0.6, 0.8, 1.0],
+                                    labels=['0.0-0.3', '0.4-0.6', '0.7-0.8', '0.9-1.0'])
+
+    effectiveness = temp_df.groupby('temp_range').agg({
+        'response_length': ['mean', 'count']
+    }).round(1)
+
+    effectiveness.columns = ['Avg Length', 'Count']
+    effectiveness = effectiveness.reset_index()
+
+    st.dataframe(effectiveness, use_container_width=True)
+
+    # Section 6: Insights and Recommendations
+    st.subheader("6. Insights & Recommendations")
+
+    insights = []
+    recommendations = []
+
+    # Calculate insights
+    if not temp_df.empty:
+        auto_pct = (len(auto_data) / len(temp_df) * 100) if len(temp_df) > 0 else 0
+        insights.append(f"📊 {auto_pct:.1f}% of queries use Auto mode (cognitive system)")
+
+        if not manual_data.empty and not auto_data.empty:
+            length_increase = ((manual_data['response_length'].mean() - auto_data['response_length'].mean()) /
+                              auto_data['response_length'].mean() * 100)
+            insights.append(f"📊 Manual mode responses are {abs(length_increase):.0f}% {'longer' if length_increase > 0 else 'shorter'} on average")
+
+        # Find most common temperature ranges
+        most_common = temp_df['temp_range'].value_counts()
+        if not most_common.empty:
+            insights.append(f"📊 Most common temperature range: {most_common.index[0]} ({most_common.values[0]} uses)")
+
+        # Recommendations based on patterns
+        if auto_pct > 80:
+            recommendations.append("💡 High Auto mode usage suggests users trust the cognitive mode system")
+        elif auto_pct < 30:
+            recommendations.append("💡 Low Auto mode usage - consider reviewing cognitive mode defaults")
+
+        if not manual_data.empty:
+            high_manual = manual_data[manual_data['actual_temperature'] > 0.85]
+            if len(high_manual) > len(manual_data) * 0.5:
+                recommendations.append("💡 Users frequently choose high temperatures manually - consider if default modes should be more creative")
+
+    # Display insights
+    if insights:
+        st.markdown("**Insights:**")
+        for insight in insights:
+            st.write(insight)
+
+    if recommendations:
+        st.markdown("**Recommendations:**")
+        for rec in recommendations:
+            st.write(rec)
+
 def main():
     st.title("GeddesGhost Admin Dashboard")
     
@@ -808,29 +1018,32 @@ def main():
         return
     
     # Create tabs for different analyses
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-        "Performance", "Document Usage", "User Analysis", "Response Metrics", "Topics Map", "Reflections", "Interventions"
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+        "Performance", "Document Usage", "User Analysis", "Response Metrics", "Temperature Analysis", "Topics Map", "Reflections", "Interventions"
     ])
-    
+
     with tab1:
         create_performance_dashboard(df)
-    
+
     with tab2:
         create_document_usage_analysis(df)
-    
+
     with tab3:
         create_user_analysis(df)
-    
+
     with tab4:
         display_response_metrics()
 
     with tab5:
-        create_topics_map(df)
+        create_temperature_analysis(df)
 
     with tab6:
-        create_reflections_analysis(df)
+        create_topics_map(df)
 
     with tab7:
+        create_reflections_analysis(df)
+
+    with tab8:
         create_interventions(df)
 
 if __name__ == "__main__":
