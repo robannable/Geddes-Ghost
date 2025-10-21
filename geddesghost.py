@@ -513,10 +513,12 @@ def initialize_log_files():
     if not os.path.exists(csv_file):
         with open(csv_file, 'w', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=[
-                'date', 'time', 'name', 'question', 'response', 
+                'date', 'time', 'name', 'question', 'response',
                 'unique_files', 'chunk1_score', 'chunk2_score', 'chunk3_score',
-                'cognitive_mode', 'response_length', 'creative_markers', 'temperature'
-            ])
+                'cognitive_mode', 'response_length', 'creative_markers', 'temperature',
+                'actual_temperature', 'temperature_source', 'detected_mode',
+                'model_provider', 'model_name'
+            ], quoting=csv.QUOTE_ALL)
             writer.writeheader()
     
     return csv_file, json_file
