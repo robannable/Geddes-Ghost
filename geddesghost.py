@@ -810,24 +810,42 @@ def get_ai_response(user_name, prompt, manual_temperature=None):
         
         # Get the character prompt
         character_prompt = get_patrick_prompt()
-        
-        # Construct structured prompt with RAG context
-        structured_prompt = f"""
-        Based on the following authoritative sources and context, please provide a response:
 
-        Authoritative Knowledge:
-        {' '.join(chunk['content'] for chunk in rag_context['authoritative'])}
+        # Add temperature-aware dynamic instructions to character prompt
+        if effective_temperature >= 0.85:
+            # High temperature: encourage expansiveness and speculation
+            temperature_guidance = "\n\nIn this moment, allow yourself to venture into bold speculation and unexpected connections. Let the response breathe and expand where the ideas demand it. Embrace creative risk."
+        elif effective_temperature <= 0.5:
+            # Low temperature: encourage focus and precision
+            temperature_guidance = "\n\nIn this moment, focus on diagnostic precision and careful observation. Be economical with words and deliberate in your analysis."
+        else:
+            # Medium temperature: balanced approach
+            temperature_guidance = "\n\nRespond with your natural voice, balancing observation with interpretation as the question warrants."
 
-        Historical Context:
-        {' '.join(chunk['content'] for chunk in rag_context['historical'])}
+        character_prompt += temperature_guidance
 
-        Student-Specific Context:
-        {' '.join(chunk['content'] for chunk in rag_context['student_specific'])}
+        # Add cognitive mode-specific subtle guidance (only in Auto mode)
+        if manual_temperature is None:  # Only add mode guidance in Auto mode
+            mode_guidance_map = {
+                'survey': " The question calls for careful observation and diagnosis.",
+                'synthesis': " The question invites connection-making across domains.",
+                'proposition': " The question opens space for speculative intervention."
+            }
+            mode_guidance = mode_guidance_map.get(selected_mode, "")
+            character_prompt += mode_guidance
 
-        User's Question: {prompt}
-        User's Name: {user_name}
-        Current Mode: {selected_mode}
-        """
+        # Construct prompt with organic context integration
+        # Combine all context without rigid labeling
+        all_context = []
+        all_context.extend(chunk['content'] for chunk in rag_context['authoritative'])
+        all_context.extend(chunk['content'] for chunk in rag_context['student_specific'])
+        all_context.extend(chunk['content'] for chunk in rag_context['historical'])
+
+        context_text = '\n\n'.join(all_context) if all_context else ""
+
+        structured_prompt = f"""{context_text}
+
+{user_name} asks: {prompt}"""
 
         # Prepare API request with structured prompt and character prompt
         response_json = api_handler.make_request(structured_prompt, system_prompt=character_prompt, temperature=effective_temperature)
@@ -867,21 +885,23 @@ def get_ai_response(user_name, prompt, manual_temperature=None):
         if not isinstance(response_content, str):
             logger.error(f"Response content is not a string: {type(response_content)}")
             response_content = str(response_content)
-        
-        # Format the response with our XML-style tags if not already present
-        if not ("<think>" in response_content and "<answer>" in response_content):
-            response_content = f"<think>Analyzing the question and context...</think>\n<answer>{response_content}</answer>"
-        
-        # Extract reasoning and answer using XML-style tags
+
+        # Parse XML-style tags if present, but don't force them
         import re
         think_match = re.search(r'<think>(.*?)</think>', response_content, re.DOTALL)
         answer_match = re.search(r'<answer>(.*?)</answer>', response_content, re.DOTALL)
-        
-        reasoning = think_match.group(1).strip() if think_match else ""
-        answer = answer_match.group(1).strip() if answer_match else response_content
-        
+
+        if think_match and answer_match:
+            # Structured response with reasoning
+            reasoning = think_match.group(1).strip()
+            answer = answer_match.group(1).strip()
+        else:
+            # Free-form response - no forced structure
+            reasoning = ""
+            answer = response_content.strip()
+
         # Clean up any remaining markdown or special characters
-        answer = answer.replace("\\n", "\n").replace("\\'", "'")
+        answer = answer.replace("\\n", "\n").replace("\\'", "')")
         
         # Log evaluation with explicit mode
         logger.info(f"Starting response evaluation for mode: {selected_mode}")
