@@ -719,43 +719,201 @@ def _extract_action_items(text):
     return actions[:10]
 
 def create_reflections_analysis(df):
-    st.header("Reflections Analysis")
-    if 'reflection_text' not in df.columns and 'self_rating' not in df.columns:
-        st.warning("No reflections data available")
+    """Analyze actual conversation data (questions and responses)"""
+    st.header("Conversation Analysis & Insights")
+
+    # Check if we have the basic required columns
+    if 'question' not in df.columns or 'response' not in df.columns:
+        st.warning("No conversation data available")
         return
 
-    reflections = df['reflection_text'] if 'reflection_text' in df.columns else pd.Series(dtype=str)
-    ratings = df['self_rating'] if 'self_rating' in df.columns else pd.Series(dtype=float)
+    # Section 1: Question Analysis
+    st.subheader("1. Student Question Patterns")
 
-    # Sentiment distribution
-    if not reflections.empty:
-        sent_scores = reflections.fillna("").apply(_simple_sentiment)
-        fig = px.histogram(sent_scores, nbins=11, title='Reflection Sentiment Distribution', labels={'value': 'Sentiment Score', 'count': 'Frequency'})
-        st.plotly_chart(fig)
+    col1, col2 = st.columns(2)
 
-        # Top keywords
-        all_keywords = []
-        for txt in reflections.dropna().tolist():
-            all_keywords.extend([k for k,_ in _extract_keywords(txt, top_k=5)])
-        if all_keywords:
-            kw_counts = pd.Series(all_keywords).value_counts().reset_index()
-            kw_counts.columns = ['Keyword', 'Count']
-            fig2 = px.bar(kw_counts.head(20), x='Keyword', y='Count', title='Top Reflection Keywords')
-            st.plotly_chart(fig2)
+    with col1:
+        # Question types analysis
+        question_types = {
+            'What/Where/When (Survey)': 0,
+            'How/Why (Synthesis)': 0,
+            'Could/Should/Might (Proposition)': 0,
+            'Other': 0
+        }
 
-        # Action items aggregation
-        actions = []
-        for txt in reflections.dropna().tolist():
-            actions.extend(_extract_action_items(txt))
-        if actions:
-            st.subheader("Common Action Items")
-            for a in actions[:20]:
-                st.write(f"- {a}")
+        for q in df['question'].dropna():
+            q_lower = str(q).lower()
+            if any(word in q_lower for word in ['what', 'where', 'when', 'which', 'who']):
+                question_types['What/Where/When (Survey)'] += 1
+            elif any(word in q_lower for word in ['how', 'why']):
+                question_types['How/Why (Synthesis)'] += 1
+            elif any(word in q_lower for word in ['could', 'should', 'might', 'would', 'imagine', 'propose']):
+                question_types['Could/Should/Might (Proposition)'] += 1
+            else:
+                question_types['Other'] += 1
 
-    # Ratings distribution
-    if 'self_rating' in df.columns and df['self_rating'].notna().any():
-        fig3 = px.histogram(df['self_rating'].dropna(), nbins=5, title='Self-Ratings Distribution', labels={'value': 'Rating', 'count': 'Frequency'})
-        st.plotly_chart(fig3)
+        fig = px.pie(values=list(question_types.values()),
+                    names=list(question_types.keys()),
+                    title="Question Types Distribution")
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col2:
+        # Question length analysis
+        question_lengths = df['question'].dropna().apply(lambda x: len(str(x).split()))
+        fig = px.histogram(question_lengths, nbins=15,
+                          title="Question Length Distribution",
+                          labels={'value': 'Words per Question', 'count': 'Frequency'})
+        st.plotly_chart(fig, use_container_width=True)
+
+    # Keywords from questions
+    st.markdown("**Top Topics in Student Questions:**")
+    all_keywords = []
+    for txt in df['question'].dropna().tolist():
+        all_keywords.extend([k for k, _ in _extract_keywords(str(txt), top_k=5)])
+
+    if all_keywords:
+        kw_counts = pd.Series(all_keywords).value_counts().reset_index()
+        kw_counts.columns = ['Topic', 'Count']
+        fig = px.bar(kw_counts.head(15), x='Topic', y='Count',
+                    title='Most Discussed Topics')
+        st.plotly_chart(fig, use_container_width=True)
+
+    # Section 2: Response Quality Analysis
+    st.subheader("2. Response Quality & Pedagogical Effectiveness")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        # Response sentiment (pedagogical tone)
+        response_sentiments = df['response'].dropna().apply(_simple_sentiment)
+        fig = px.histogram(response_sentiments, nbins=11,
+                          title='Response Pedagogical Tone',
+                          labels={'value': 'Tone Score (negative=challenging, positive=supportive)',
+                                 'count': 'Frequency'})
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col2:
+        # Response complexity (word length as proxy)
+        if 'response_length' in df.columns:
+            response_lengths = pd.to_numeric(df['response_length'], errors='coerce').dropna()
+            if not response_lengths.empty:
+                fig = px.histogram(response_lengths, nbins=15,
+                                 title='Response Complexity (Word Count)',
+                                 labels={'value': 'Words per Response', 'count': 'Frequency'})
+                st.plotly_chart(fig, use_container_width=True)
+
+    # Section 3: Pedagogical Patterns
+    st.subheader("3. Pedagogical Patterns in Responses")
+
+    # Analyze response characteristics
+    pedagogical_markers = {
+        'Questions (Socratic)': 0,
+        'Examples/Cases': 0,
+        'References to Others': 0,
+        'Challenges Assumptions': 0,
+        'Encourages Observation': 0
+    }
+
+    for r in df['response'].dropna():
+        r_str = str(r).lower()
+        if '?' in r_str:
+            pedagogical_markers['Questions (Socratic)'] += r_str.count('?')
+        if any(word in r_str for word in ['example', 'instance', 'case', 'consider']):
+            pedagogical_markers['Examples/Cases'] += 1
+        if any(word in r_str for word in ['cite', 'author', 'scholar', 'expert', 'research']):
+            pedagogical_markers['References to Others'] += 1
+        if any(word in r_str for word in ['assumption', 'presume', 'challenge', 'question']):
+            pedagogical_markers['Challenges Assumptions'] += 1
+        if any(word in r_str for word in ['observe', 'look', 'examine', 'study', 'survey']):
+            pedagogical_markers['Encourages Observation'] += 1
+
+    fig = px.bar(x=list(pedagogical_markers.keys()),
+                y=list(pedagogical_markers.values()),
+                title='Pedagogical Techniques Used',
+                labels={'x': 'Technique', 'y': 'Frequency'})
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Section 4: Engagement Patterns
+    st.subheader("4. Engagement Patterns Over Time")
+
+    if 'date' in df.columns:
+        df_time = df.copy()
+        df_time['date'] = pd.to_datetime(df_time['date'], errors='coerce')
+        df_time = df_time.dropna(subset=['date'])
+
+        if not df_time.empty:
+            # Conversations per day
+            daily_conv = df_time.groupby(df_time['date'].dt.date).size().reset_index()
+            daily_conv.columns = ['Date', 'Conversations']
+
+            fig = px.line(daily_conv, x='Date', y='Conversations',
+                         title='Conversation Activity Over Time',
+                         markers=True)
+            st.plotly_chart(fig, use_container_width=True)
+
+    # Section 5: Key Insights Summary
+    st.subheader("5. Key Insights")
+
+    insights = []
+
+    # Calculate insights
+    total_conversations = len(df)
+    unique_users = df['name'].nunique() if 'name' in df.columns else 0
+
+    if total_conversations > 0:
+        insights.append(f"📊 {total_conversations} total conversations with {unique_users} unique users")
+
+    # Average response length
+    if 'response_length' in df.columns:
+        avg_length = pd.to_numeric(df['response_length'], errors='coerce').mean()
+        if not pd.isna(avg_length):
+            insights.append(f"📝 Average response length: {avg_length:.0f} words")
+
+    # Most common question type
+    if question_types:
+        most_common = max(question_types.items(), key=lambda x: x[1])
+        insights.append(f"❓ Most common question type: {most_common[0]} ({most_common[1]} questions)")
+
+    # Pedagogical approach
+    total_questions_in_responses = pedagogical_markers['Questions (Socratic)']
+    if total_conversations > 0:
+        questions_per_response = total_questions_in_responses / total_conversations
+        insights.append(f"💭 Average {questions_per_response:.1f} Socratic questions per response (fostering inquiry)")
+
+    # Temperature preference
+    if 'temperature_source' in df.columns:
+        auto_count = df['temperature_source'].str.contains('auto', case=False, na=False).sum()
+        manual_count = (df['temperature_source'] == 'manual').sum()
+        if auto_count + manual_count > 0:
+            auto_pct = auto_count / (auto_count + manual_count) * 100
+            insights.append(f"🌡️ {auto_pct:.0f}% use Auto mode (cognitive system trusted)")
+
+    # Display insights
+    for insight in insights:
+        st.write(insight)
+
+    # Recommendations
+    st.markdown("**💡 Recommendations:**")
+    recommendations = []
+
+    if question_types.get('What/Where/When (Survey)', 0) > total_conversations * 0.6:
+        recommendations.append("• High proportion of survey questions - consider prompting students toward synthesis and proposition")
+
+    if pedagogical_markers.get('Questions (Socratic)', 0) / total_conversations > 2:
+        recommendations.append("• Strong Socratic approach - students are being challenged to think critically")
+    elif pedagogical_markers.get('Questions (Socratic)', 0) / total_conversations < 0.5:
+        recommendations.append("• Consider increasing use of questions to foster student inquiry")
+
+    if avg_length and avg_length < 50:
+        recommendations.append("• Responses are concise - consider if more elaboration would help some topics")
+    elif avg_length and avg_length > 150:
+        recommendations.append("• Responses are detailed - ensure students aren't overwhelmed")
+
+    if recommendations:
+        for rec in recommendations:
+            st.write(rec)
+    else:
+        st.write("• System is performing well - continue monitoring patterns")
 
 def create_interventions(df):
     st.header("Interventions (Suggested Teaching Plan)")
@@ -1018,7 +1176,7 @@ def main():
     
     # Create tabs for different analyses
     tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
-        "Performance", "Document Usage", "User Analysis", "Response Metrics", "Temperature Analysis", "Topics Map", "Reflections", "Interventions"
+        "Performance", "Document Usage", "User Analysis", "Response Metrics", "Temperature Analysis", "Topics Map", "Conversation Insights", "Interventions"
     ])
 
     with tab1:
