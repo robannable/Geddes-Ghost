@@ -589,12 +589,12 @@ def update_chat_logs(user_name, question, response, unique_files, chunk_info, cs
         'model_name': current_model
     }
     
-    # Write to CSV
+    # Write to CSV with proper quoting to handle multi-line responses
     fieldnames = list(csv_row.keys())
     write_header = not os.path.exists(csv_file)
-    
+
     with open(csv_file, mode='a', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, quoting=csv.QUOTE_ALL)
         if write_header:
             writer.writeheader()
         writer.writerow(csv_row)
