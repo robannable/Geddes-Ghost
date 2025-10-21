@@ -157,52 +157,51 @@ def load_response_data(logs_dir):
     """Load and combine response data from all CSV files"""
     all_data = []
     csv_files = [f for f in os.listdir(logs_dir) if f.endswith('_response_log.csv')]
-    
+
     if not csv_files:
         logger.error("No CSV files found in logs directory")
         return pd.DataFrame()
-    
+
     for filename in csv_files:
         file_path = os.path.join(logs_dir, filename)
         logger.info(f"Processing file: {filename}")
-        
+
         try:
-            # Try reading with default settings first
+            # Try reading with proper CSV quoting to handle multi-line fields
             try:
-                df = pd.read_csv(file_path)
-                logger.info(f"Successfully read {filename} with default settings")
+                df = pd.read_csv(
+                    file_path,
+                    quoting=csv.QUOTE_ALL,
+                    encoding='utf-8',
+                    on_bad_lines='skip'
+                )
+                logger.info(f"Successfully read {filename} with QUOTE_ALL")
             except Exception as e:
-                logger.warning(f"Failed to read {filename} with default settings: {str(e)}")
-                # Try different encodings
-                encodings = ['utf-8-sig', 'latin1', 'utf-8']
-                df = None
-                
-                for encoding in encodings:
-                    try:
-                        df = pd.read_csv(
-                            file_path,
-                            encoding=encoding,
-                            on_bad_lines='skip',
-                            quoting=csv.QUOTE_MINIMAL,
-                            escapechar='\\',
-                            lineterminator='\n',
-                            engine='python'
-                        )
-                        logger.info(f"Successfully read {filename} with {encoding} encoding")
-                        break
-                    except Exception as e:
-                        logger.warning(f"Failed to read {filename} with {encoding}: {str(e)}")
-                        continue
-            
+                logger.warning(f"Failed to read {filename} with QUOTE_ALL: {str(e)}")
+                # Try with minimal quoting
+                try:
+                    df = pd.read_csv(
+                        file_path,
+                        encoding='utf-8',
+                        on_bad_lines='skip'
+                    )
+                    logger.info(f"Successfully read {filename} with default settings")
+                except Exception as e2:
+                    logger.warning(f"Failed to read {filename} with default: {str(e2)}")
+                    df = None
+
             if df is None:
                 logger.error(f"Could not read {filename} with any settings")
                 continue
-            
+
             # Log the columns found in the DataFrame
             logger.info(f"Columns in {filename}: {df.columns.tolist()}")
-            
+
             # Check for missing columns and add them with None values
-            new_columns = ['cognitive_mode', 'response_length', 'creative_markers', 'temperature', 'model_provider', 'model_name']
+            # Include both old and new column names
+            new_columns = ['cognitive_mode', 'response_length', 'creative_markers', 'temperature',
+                          'actual_temperature', 'temperature_source', 'detected_mode',
+                          'model_provider', 'model_name']
             for col in new_columns:
                 if col not in df.columns:
                     df[col] = None
