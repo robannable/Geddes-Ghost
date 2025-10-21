@@ -39,7 +39,10 @@ from datetime import datetime
 from dataclasses import dataclass
 from typing import List, Dict
 from pypdf import PdfReader
-from langchain.text_splitter import CharacterTextSplitter
+try:
+    from langchain_text_splitters import CharacterTextSplitter
+except ImportError:
+    from langchain.text_splitter import CharacterTextSplitter
 import pytesseract
 from PIL import Image
 from sklearn.feature_extraction.text import TfidfVectorizer
