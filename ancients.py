@@ -1,13 +1,21 @@
 """
-GeddesGhost AI Assistant System
---------------------------------
-A Retrieval-Augmented Generation (RAG) application that simulates interactions
-with Patrick Geddes, the Scottish polymath. The system currently includes:
+With The Ancients - AI Assistant System
+----------------------------------------
+A Retrieval-Augmented Generation (RAG) application for conversations with
+historical figures. Inspired by Helen de Cruz's work on philosophical dialogue
+with the past. The system includes:
 
-- TF-IDF-based retrieval over `documents/`, `history/`, and `students/`
-- Dynamic cognitive modes with temperature variation (0.7–0.9)
+- Multi-character conversation system (single, parallel, dialogue modes)
+- Character configuration system for easily adding new historical figures
+- TF-IDF-based retrieval over character-specific knowledge bases
+- Dynamic cognitive modes with temperature variation
 - Context-aware response generation via Anthropic Claude (default) or Ollama
-- Comprehensive logging and an Admin Dashboard for analytics
+- Comprehensive logging and Admin Dashboard for analytics
+
+Conversation Modes:
+1. Single Character: Traditional one-on-one dialogue
+2. Multiple Perspectives: Get responses from several figures simultaneously
+3. Character Dialogue: Watch historical figures discuss topics together
 
 Admin Dashboard views:
 1. Performance, Document Usage, User Analysis, Response Metrics
@@ -16,16 +24,14 @@ Admin Dashboard views:
 4. Interventions (auto-generated teaching plan)
 
 Document categories used for retrieval:
-1. Authoritative documents (core knowledge)
+1. Character-specific documents (core knowledge from their writings)
 2. Historical records (past interactions)
 3. Student-specific content (personalized context)
 
-Responses are generated using a structured context assembly process and
-cognitive mode selection system inspired by Geddes' teaching approach.
-
-Author: Rob Annable
-Last Updated: 08-09-2025
-Version: 1.1
+Author: Rob Annable (Birmingham School of Architecture)
+Inspired by: Helen de Cruz's "Thinking with the Ancients"
+Last Updated: 2025-01-23
+Version: 2.0 - Multi-Character System
 """
 
 import re

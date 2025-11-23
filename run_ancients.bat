@@ -1,5 +1,5 @@
 @echo off
-REM === GeddesGhost Local Runner ===
+REM === With The Ancients Local Runner ===
 
 REM Step 1: Check for venv, create if missing
 IF NOT EXIST .venv (
@@ -15,4 +15,4 @@ pip install -r requirements.txt
 REM Step 3: Run Streamlit app and force browser open
 set STREAMLIT_BROWSER_GOTO_NEW_TAB=true
 start "" http://localhost:8501
-streamlit run geddesghost.py --server.headless true --browser.serverAddress localhost --server.runOnSave true 
+streamlit run ancients.py --server.headless true --browser.serverAddress localhost --server.runOnSave true

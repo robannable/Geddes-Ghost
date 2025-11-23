@@ -1159,7 +1159,7 @@ def create_temperature_analysis(df):
             st.write(rec)
 
 def main():
-    st.title("GeddesGhost Admin Dashboard")
+    st.title("With The Ancients - Admin Dashboard")
     
     if not check_password():
         st.stop()

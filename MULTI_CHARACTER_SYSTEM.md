@@ -1,8 +1,8 @@
-# Multi-Character Historical Figure System
+# With The Ancients: Multi-Character System Documentation
 
 ## Overview
 
-This application has been refactored from a single-character (Patrick Geddes) chatbot into a **flexible multi-character conversation system** that allows users to:
+**With The Ancients** is a flexible multi-character conversation system inspired by Helen de Cruz's work on philosophical dialogue with historical figures. The application that allows users to:
 
 1. **Switch between different historical figures** easily
 2. **Get multiple perspectives** on the same question from several figures simultaneously
