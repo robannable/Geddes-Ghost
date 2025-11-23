@@ -7,6 +7,8 @@ students/
 debug_logs/
 .venv/
 __pycache__/
-documents/
+/documents/
 /.stfolder
 .stignore
+# Note: /documents/ ignores root-level documents directory
+# but allows characters/*/documents/ for character-specific knowledge bases

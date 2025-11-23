@@ -48,6 +48,21 @@ from PIL import Image
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
+
+# Import character configuration system
+from character_config import (
+    CharacterConfig,
+    CharacterManager,
+    CognitiveModeSystem,
+    CreativeMarkerDetector
+)
+
+# Import multi-character conversation system
+from multi_character import (
+    MultiCharacterConversation,
+    MultiCharacterResponseGenerator,
+    create_multi_character_session
+)
 import html
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
@@ -137,80 +152,10 @@ class EnhancedContextManager:
         
         return categorized_context
 
-class GeddesCognitiveModes:
-    def __init__(self):
-        self.modes = {
-            'survey': {
-                'keywords': [
-                    'what', 'describe', 'analyze', 'observe', 'examine', 'study',
-                    'investigate', 'explore', 'map', 'document', 'record', 'measure',
-                    'identify', 'catalogue', 'survey', 'inspect', 'review', 'assess',
-                    'where', 'when', 'who', 'which', 'look', 'find', 'discover'
-                ],
-                'prompt_prefix': 'Let us first survey and observe...',
-                'temperature': 0.7
-            },
-            'synthesis': {
-                'keywords': [
-                    'how', 'connect', 'relate', 'integrate', 'combine', 'synthesize',
-                    'weave', 'blend', 'merge', 'link', 'bridge', 'join', 'unite',
-                    'pattern', 'relationship', 'network', 'system', 'structure',
-                    'framework', 'together', 'between', 'across', 'through',
-                    'interconnect', 'associate', 'correlate'
-                ],
-                'prompt_prefix': 'Now, let us weave together these disparate threads...',
-                'temperature': 0.8
-            },
-            'proposition': {
-                'keywords': [
-                    'why', 'propose', 'suggest', 'could', 'might', 'imagine',
-                    'envision', 'create', 'design', 'develop', 'innovate', 'transform',
-                    'improve', 'enhance', 'advance', 'future', 'potential', 'possible',
-                    'alternative', 'solution', 'strategy', 'plan', 'vision',
-                    'hypothesis', 'theory', 'concept'
-                ],
-                'prompt_prefix': 'Let us venture forth with a proposition...',
-                'temperature': 0.9
-            }
-        }
-        logger.info("Initializing new GeddesCognitiveModes")
-
-    def get_mode_parameters(self, prompt: str) -> dict:
-        # Convert prompt to lowercase for matching
-        prompt_lower = prompt.lower()
-        
-        # Count keyword matches for each mode with weighted scoring
-        mode_scores = {}
-        for mode, params in self.modes.items():
-            # Count exact keyword matches
-            exact_matches = sum(
-                1 for keyword in params['keywords'] 
-                if f" {keyword} " in f" {prompt_lower} "  # Add spaces to ensure whole word matching
-            )
-            
-            # Count partial matches (for compound words or variations)
-            partial_matches = sum(
-                0.5 for keyword in params['keywords']
-                if keyword in prompt_lower and f" {keyword} " not in f" {prompt_lower} "
-            )
-            
-            # Combine scores
-            mode_scores[mode] = exact_matches + partial_matches
-        
-        # Select mode with highest score (default to 'survey' if tied or no matches)
-        selected_mode = max(
-            mode_scores.items(),
-            key=lambda x: (x[1], x[0] == 'survey')  # Prioritize survey mode in ties
-        )[0]
-        
-        # Log the selected mode and score
-        logger.info(f"Selected mode: {selected_mode} (score: {mode_scores[selected_mode]})")
-        
-        return {
-            'mode': selected_mode,
-            'prompt_prefix': self.modes[selected_mode]['prompt_prefix'],
-            'temperature': self.modes[selected_mode]['temperature']
-        }
+# DEPRECATED: Old GeddesCognitiveModes class replaced by character_config.CognitiveModeSystem
+# Kept for reference during migration
+# class GeddesCognitiveModes:
+#     ... (moved to character_config.py as CognitiveModeSystem)
 
 # Load model config from file or notepad (for now, hardcode as a dict)
 MODEL_CONFIG = {
@@ -332,16 +277,33 @@ def check_api_connection():
         return False
 
 @st.cache_data
-def get_patrick_prompt():
-    prompt_file_path = os.path.join(prompts_dir, 'patrick_geddes_prompt.txt')
+def get_character_prompt(character_config: CharacterConfig):
+    """
+    Get system prompt for a character, with inclusive language guidance.
+
+    Args:
+        character_config: CharacterConfig object for the character
+
+    Returns:
+        Complete system prompt string
+    """
     try:
-        with open(prompt_file_path, 'r') as file:
-            prompt = file.read().strip()
+        prompt = character_config.get_system_prompt()
+        # Add inclusive language guidance
         prompt += "\n\nWhen responding to users, consider their name and potential gender implications. Avoid making assumptions based on stereotypes and strive for inclusive language. Adapt your language and examples to be appropriate for all users, regardless of their perceived gender."
         return prompt
-    except FileNotFoundError:
-        st.warning(f"'{prompt_file_path}' not found. Using default prompt.")
-        return "You are Patrick Geddes, a Scottish biologist, sociologist, and town planner. When responding to users, consider their name and potential gender implications. Avoid making assumptions based on stereotypes and strive for inclusive language. Adapt your language and examples to be appropriate for all users, regardless of their perceived gender."
+    except Exception as e:
+        logger.error(f"Error loading character prompt: {e}")
+        # Fallback to basic prompt
+        return character_config._generate_fallback_prompt() + "\n\nWhen responding to users, consider their name and potential gender implications. Avoid making assumptions based on stereotypes and strive for inclusive language."
+
+# DEPRECATED: Old function kept for compatibility during migration
+def get_patrick_prompt():
+    """Legacy function - redirects to character config system."""
+    if 'current_character' in st.session_state:
+        return get_character_prompt(st.session_state.current_character)
+    # Emergency fallback
+    return "You are a helpful AI assistant engaged in thoughtful conversation."
 
 @st.cache_data
 def get_about_info():
@@ -353,11 +315,21 @@ def get_about_info():
         return "This app uses advanced AI models to simulate a conversation with Patrick Geddes...", False
 
 @st.cache_data
-def load_documents(directories=['documents', 'history', 'students']):
+def load_documents(directories=['documents', 'history', 'students'], character_id=None):
+    """
+    Load documents for RAG system.
+
+    Args:
+        directories: List of directory types to load ('documents', 'history', 'students')
+        character_id: If provided, loads character-specific documents from characters/{character_id}/documents
+
+    Returns:
+        List of (text, filename) tuples
+    """
     total_start_time = time.time()
     texts = []
     current_date = datetime.now().strftime("%d-%m-%Y")
-    
+
     # Define system directories to ignore
     ignore_dirs = {
         '__pycache__',
@@ -367,11 +339,16 @@ def load_documents(directories=['documents', 'history', 'students']):
         'logs',
         'sounds',
         'prompts',
-        'images'
+        'images',
+        'characters'  # Don't load the entire characters directory
     }
-    
+
     for directory in directories:
-        dir_path = os.path.join(script_dir, directory)
+        # Handle character-specific documents directory
+        if directory == 'documents' and character_id:
+            dir_path = os.path.join(script_dir, 'characters', character_id, 'documents')
+        else:
+            dir_path = os.path.join(script_dir, directory)
         if os.path.exists(dir_path):
             dir_start_time = time.time()
             files_processed = 0
@@ -434,7 +411,8 @@ def compute_tfidf_matrix(document_chunks):
     return vectorizer, tfidf_matrix
 
 # Load document chunks and compute TF-IDF matrix at startup
-document_chunks_with_filenames = load_documents(['documents', 'history', 'students'])
+# Note: This initial load uses 'patrick_geddes' as default. Will reload when character changes.
+document_chunks_with_filenames = load_documents(['documents', 'history', 'students'], character_id='patrick_geddes')
 vectorizer, tfidf_matrix = compute_tfidf_matrix(document_chunks_with_filenames)
 
 def is_name_match(query_name: str, target_name: str) -> bool:
@@ -823,31 +801,22 @@ def get_ai_response(user_name, prompt, manual_temperature=None):
             today_history=today_history
         )
         
-        # Get the character prompt
-        character_prompt = get_patrick_prompt()
+        # Get the character prompt from current character config
+        current_char = st.session_state.current_character
+        character_prompt = get_character_prompt(current_char)
 
-        # Add temperature-aware dynamic instructions to character prompt
-        if effective_temperature >= 0.85:
-            # High temperature: encourage expansiveness and speculation
-            temperature_guidance = "\n\nIn this moment, allow yourself to venture into bold speculation and unexpected connections. Let the response breathe and expand where the ideas demand it. Embrace creative risk."
-        elif effective_temperature <= 0.5:
-            # Low temperature: encourage focus and precision
-            temperature_guidance = "\n\nIn this moment, focus on diagnostic precision and careful observation. Be economical with words and deliberate in your analysis."
-        else:
-            # Medium temperature: balanced approach
-            temperature_guidance = "\n\nRespond with your natural voice, balancing observation with interpretation as the question warrants."
-
-        character_prompt += temperature_guidance
+        # Add temperature-aware dynamic instructions from character config
+        temperature_guidance = current_char.get_temperature_guidance(effective_temperature)
+        if temperature_guidance:
+            character_prompt += "\n\n" + temperature_guidance
 
         # Add cognitive mode-specific subtle guidance (only in Auto mode)
         if manual_temperature is None:  # Only add mode guidance in Auto mode
-            mode_guidance_map = {
-                'survey': " The question calls for careful observation and diagnosis.",
-                'synthesis': " The question invites connection-making across domains.",
-                'proposition': " The question opens space for speculative intervention."
-            }
-            mode_guidance = mode_guidance_map.get(selected_mode, "")
-            character_prompt += mode_guidance
+            # Get mode guidance from cognitive mode system
+            mode_params = st.session_state.cognitive_modes.get_mode_parameters(prompt)
+            mode_guidance = mode_params.get('guidance', '')
+            if mode_guidance:
+                character_prompt += " " + mode_guidance
 
         # Construct prompt with organic context integration
         # Combine all context without rigid labeling
@@ -946,10 +915,101 @@ def get_ai_response(user_name, prompt, manual_temperature=None):
         logger.error(f"Error in get_ai_response: {str(e)}")
         return f"An unexpected error occurred: {str(e)}", [], [], {'temperature': 0.7, 'source': 'error', 'mode': 'unknown'}
 
-# Initialize session state objects
-if 'cognitive_modes' not in st.session_state:
-    logger.info("Initializing new GeddesCognitiveModes")
-    st.session_state.cognitive_modes = GeddesCognitiveModes()
+
+def get_multi_character_responses(character_ids, user_query, context_text=""):
+    """
+    Get responses from multiple characters in parallel.
+
+    Args:
+        character_ids: List of character IDs to query
+        user_query: User's question
+        context_text: RAG context
+
+    Returns:
+        Formatted multi-character response string
+    """
+    try:
+        # Create multi-character session
+        multi_conv = create_multi_character_session(character_ids, st.session_state.character_manager)
+
+        # Create response generator
+        api_handler = ModelAPIHandler(MODEL_CONFIG)
+        generator = MultiCharacterResponseGenerator(api_handler)
+
+        # Generate parallel responses
+        responses = generator.generate_parallel_responses(
+            multi_conv,
+            user_query,
+            context_text=context_text
+        )
+
+        # Format for display
+        formatted = multi_conv.format_parallel_responses(responses)
+
+        return formatted
+
+    except Exception as e:
+        logger.error(f"Error in multi-character response: {str(e)}")
+        return f"Error generating multi-character responses: {str(e)}"
+
+
+def get_character_dialogue(character_ids, topic, context_text="", num_turns=2):
+    """
+    Generate a dialogue between multiple characters.
+
+    Args:
+        character_ids: List of character IDs to participate
+        topic: Discussion topic
+        context_text: RAG context
+        num_turns: Number of turns per character
+
+    Returns:
+        Formatted dialogue string
+    """
+    try:
+        # Create multi-character session
+        multi_conv = create_multi_character_session(character_ids, st.session_state.character_manager)
+
+        # Create response generator
+        api_handler = ModelAPIHandler(MODEL_CONFIG)
+        generator = MultiCharacterResponseGenerator(api_handler)
+
+        # Generate dialogue
+        conversation_history = generator.generate_dialogue(
+            multi_conv,
+            topic,
+            context_text=context_text,
+            num_turns=num_turns
+        )
+
+        # Format for display
+        formatted = multi_conv.format_dialogue(conversation_history, topic)
+
+        return formatted
+
+    except Exception as e:
+        logger.error(f"Error in character dialogue: {str(e)}")
+        return f"Error generating character dialogue: {str(e)}"
+
+
+# Initialize Character Manager (manages all available characters)
+if 'character_manager' not in st.session_state:
+    logger.info("Initializing CharacterManager")
+    st.session_state.character_manager = CharacterManager(characters_dir='characters')
+
+# Initialize current character (default to Patrick Geddes)
+if 'current_character' not in st.session_state:
+    logger.info("Loading default character (Patrick Geddes)")
+    st.session_state.current_character = st.session_state.character_manager.get_character('patrick_geddes')
+    if st.session_state.current_character is None:
+        st.error("Failed to load default character. Please check character configuration.")
+        st.stop()
+
+# Initialize cognitive modes for current character
+if 'cognitive_modes' not in st.session_state or st.session_state.get('reload_character', False):
+    logger.info(f"Initializing CognitiveModeSystem for {st.session_state.current_character.get_name()}")
+    st.session_state.cognitive_modes = CognitiveModeSystem(st.session_state.current_character)
+    st.session_state.reload_character = False
 
 if 'context_manager' not in st.session_state:
     st.session_state.context_manager = EnhancedContextManager()
@@ -959,8 +1019,73 @@ if 'response_evaluator' not in st.session_state:
     from admin_dashboard import ResponseEvaluator
     st.session_state.response_evaluator = ResponseEvaluator()
 
-# Streamlit UI
-st.title("The Ghost of Geddes...")
+# Streamlit UI - use current character's page title
+current_char = st.session_state.current_character
+st.title(current_char.get_page_title())
+
+# Sidebar - Conversation Mode Selection
+st.sidebar.header("Conversation Mode")
+
+conversation_mode = st.sidebar.radio(
+    "Select mode:",
+    ["Single Character", "Multiple Perspectives", "Character Dialogue"],
+    help="Single: One character responds | Multiple: Several characters answer the same question | Dialogue: Characters discuss a topic"
+)
+
+# Initialize session state for selected characters
+if 'selected_character_ids' not in st.session_state:
+    st.session_state.selected_character_ids = ['patrick_geddes']
+
+st.sidebar.markdown("---")
+
+# Character Selection (different UI based on mode)
+st.sidebar.header("Character Selection")
+
+character_display_list = st.session_state.character_manager.get_character_display_list()
+
+if conversation_mode == "Single Character":
+    # Single character dropdown
+    if character_display_list:
+        display_to_id = {display: char_id for display, char_id in character_display_list}
+        current_display = f"{current_char.get_name()} ({current_char.get_lifespan()})"
+
+        selected_display = st.sidebar.selectbox(
+            "Select Historical Figure",
+            options=[display for display, _ in character_display_list],
+            index=[display for display, _ in character_display_list].index(current_display) if current_display in [d for d, _ in character_display_list] else 0
+        )
+
+        # If character changed, update session state
+        selected_id = display_to_id[selected_display]
+        if selected_id != st.session_state.current_character.character_id:
+            st.session_state.current_character = st.session_state.character_manager.get_character(selected_id)
+            st.session_state.reload_character = True
+            st.session_state.cognitive_modes = CognitiveModeSystem(st.session_state.current_character)
+            st.session_state.selected_character_ids = [selected_id]
+            st.rerun()
+
+else:
+    # Multiple character checkboxes
+    st.sidebar.write("Select characters to include:")
+
+    selected_chars = []
+    for display, char_id in character_display_list:
+        # Use session state to remember selections
+        default_checked = char_id in st.session_state.selected_character_ids
+        if st.sidebar.checkbox(display, value=default_checked, key=f"char_{char_id}"):
+            selected_chars.append(char_id)
+
+    # Update session state
+    if selected_chars != st.session_state.selected_character_ids:
+        st.session_state.selected_character_ids = selected_chars
+        # If switching from single to multi, keep current character selected
+        if len(selected_chars) == 0 and current_char.character_id not in selected_chars:
+            st.session_state.selected_character_ids = [current_char.character_id]
+
+    # Show count
+    st.sidebar.caption(f"{len(st.session_state.selected_character_ids)} character(s) selected")
+
+st.sidebar.markdown("---")
 
 # Sidebar for About information and model selection
 about_content, contains_html = get_about_info()
@@ -1027,56 +1152,162 @@ if st.sidebar.button("Reload documents (RAG)"):
         st.cache_data.clear()
         st.cache_resource.clear()
 
-        # Reload documents and recompute TF-IDF
-        document_chunks_with_filenames = load_documents(['documents', 'history', 'students'])
+        # Reload documents for current character and recompute TF-IDF
+        current_character_id = st.session_state.current_character.character_id
+        document_chunks_with_filenames = load_documents(['documents', 'history', 'students'], character_id=current_character_id)
         vectorizer, tfidf_matrix = compute_tfidf_matrix(document_chunks_with_filenames)
-        st.sidebar.success("Documents reloaded and index recomputed.")
-        logger.info("RAG documents reloaded and TF-IDF recomputed via sidebar control")
+        st.sidebar.success(f"Documents reloaded for {st.session_state.current_character.get_name()}")
+        logger.info(f"RAG documents reloaded for {current_character_id} and TF-IDF recomputed via sidebar control")
     except Exception as e:
         st.sidebar.error(f"Reload failed: {str(e)}")
         logger.error(f"RAG reload failed: {str(e)}")
 
-# Introduction section with image and personal introduction
-col1, col2 = st.columns([0.8, 3.2])
-with col1:
-    try:
-        st.image("images/patrick_geddes.jpg", width=130)
-    except Exception as e:
-        st.write("Image not available")
+# Introduction section - changes based on conversation mode
+if conversation_mode == "Single Character":
+    # Single character introduction
+    col1, col2 = st.columns([0.8, 3.2])
+    with col1:
+        try:
+            portrait_path = current_char.get_portrait_path()
+            if os.path.exists(portrait_path):
+                st.image(portrait_path, width=130)
+            else:
+                st.write("Portrait not available")
+        except Exception as e:
+            st.write("Portrait not available")
+            logger.error(f"Error loading portrait: {e}")
 
-with col2:
-    st.markdown("""
-    Greetings, dear inquirer! I am Patrick Geddes, a man of many hats - biologist, sociologist, geographer, and yes, a bit of a revolutionary in the realm of town planning, if I do say so myself. 
-    
-    Now, my eager student, what's your name? And more importantly, what burning question about our shared world shall we explore together? 
-    Remember, "By leaves we live" - so let your curiosity bloom and ask away!
-    """, unsafe_allow_html=True)
+    with col2:
+        st.markdown(current_char.get_greeting(), unsafe_allow_html=True)
 
-# Input section for user queries
+elif conversation_mode == "Multiple Perspectives":
+    # Show selected characters
+    st.markdown("### Multiple Perspectives Mode")
+    st.write(f"Ask a question and get responses from {len(st.session_state.selected_character_ids)} different historical figures:")
+
+    # Show mini portraits if available
+    if st.session_state.selected_character_ids:
+        cols = st.columns(len(st.session_state.selected_character_ids))
+        for idx, char_id in enumerate(st.session_state.selected_character_ids):
+            char = st.session_state.character_manager.get_character(char_id)
+            if char:
+                with cols[idx]:
+                    portrait_path = char.get_portrait_path()
+                    if os.path.exists(portrait_path):
+                        st.image(portrait_path, width=100)
+                    st.caption(f"**{char.get_name()}**")
+
+else:  # Character Dialogue
+    st.markdown("### Character Dialogue Mode")
+    st.write(f"Watch {len(st.session_state.selected_character_ids)} historical figures discuss a topic:")
+
+    # Show selected characters
+    if st.session_state.selected_character_ids:
+        char_names = []
+        for char_id in st.session_state.selected_character_ids:
+            char = st.session_state.character_manager.get_character(char_id)
+            if char:
+                char_names.append(char.get_name())
+        st.info(f"**Participants:** {', '.join(char_names)}")
+
+# Input section for user queries (changes based on mode)
 user_name_input = st.text_input("Enter your name:")
-prompt_input = st.text_area("Discuss your project with Patrick:")
+
+if conversation_mode == "Character Dialogue":
+    prompt_input = st.text_area("Enter a topic for discussion:", placeholder="e.g., 'The role of density in creating vibrant urban neighborhoods'")
+    num_turns = st.slider("Number of turns per character:", min_value=1, max_value=5, value=2)
+else:
+    if conversation_mode == "Single Character":
+        prompt_input = st.text_area(current_char.get_input_label())
+    else:
+        prompt_input = st.text_area("Ask your question:")
 
 if st.button('Submit'):
     if user_name_input and prompt_input:
-        with st.spinner('Re-animating Geddes Ghost...'):
+        # Determine spinner message based on mode
+        if conversation_mode == "Single Character":
+            spinner_msg = current_char.get_loading_message()
+        elif conversation_mode == "Multiple Perspectives":
+            spinner_msg = f"Getting responses from {len(st.session_state.selected_character_ids)} characters..."
+        else:
+            spinner_msg = "Generating dialogue..."
+
+        with st.spinner(spinner_msg):
             try:
                 # Get the latest file paths
                 csv_file, json_file = initialize_log_files()
 
-                # Get response and update logs
-                response_content, unique_files, chunk_info, temperature_info = get_ai_response(
-                    user_name_input.strip(),
-                    prompt_input.strip(),
-                    manual_temperature=manual_temperature
-                )
-                
-                # Check for error messages in response
-                if isinstance(response_content, str) and "error" in response_content.lower():
-                    st.error(response_content)
-                    st.stop()
-                
-                # Unpack reasoning and answer
-                reasoning, answer = response_content
+                # Handle different conversation modes
+                if conversation_mode == "Single Character":
+                    # Original single character logic
+                    response_content, unique_files, chunk_info, temperature_info = get_ai_response(
+                        user_name_input.strip(),
+                        prompt_input.strip(),
+                        manual_temperature=manual_temperature
+                    )
+
+                    # Check for error messages in response
+                    if isinstance(response_content, str) and "error" in response_content.lower():
+                        st.error(response_content)
+                        st.stop()
+
+                    # Unpack reasoning and answer
+                    reasoning, answer = response_content
+
+                elif conversation_mode == "Multiple Perspectives":
+                    # Multi-character parallel responses
+                    if len(st.session_state.selected_character_ids) == 0:
+                        st.error("Please select at least one character.")
+                        st.stop()
+
+                    # Get RAG context for the query
+                    query_vector = vectorizer.transform([prompt_input.strip()])
+                    similarities = cosine_similarity(query_vector, tfidf_matrix).flatten()
+                    top_indices = similarities.argsort()[-5:][::-1]
+                    top_chunks = [(document_chunks_with_filenames[i][0], document_chunks_with_filenames[i][1])
+                                  for i in top_indices]
+                    context_text = '\n\n'.join([chunk for chunk, _ in top_chunks])
+
+                    # Generate multi-character responses
+                    answer = get_multi_character_responses(
+                        st.session_state.selected_character_ids,
+                        prompt_input.strip(),
+                        context_text=context_text
+                    )
+
+                    # For multi-character, we don't have reasoning/unique files like single mode
+                    reasoning = ""
+                    unique_files = []
+                    chunk_info = []
+                    temperature_info = {'temperature': 0.8, 'source': 'multi-character', 'mode': 'parallel'}
+
+                else:  # Character Dialogue
+                    # Multi-character dialogue
+                    if len(st.session_state.selected_character_ids) < 2:
+                        st.error("Please select at least two characters for a dialogue.")
+                        st.stop()
+
+                    # Get RAG context for the topic
+                    query_vector = vectorizer.transform([prompt_input.strip()])
+                    similarities = cosine_similarity(query_vector, tfidf_matrix).flatten()
+                    top_indices = similarities.argsort()[-5:][::-1]
+                    top_chunks = [(document_chunks_with_filenames[i][0], document_chunks_with_filenames[i][1])
+                                  for i in top_indices]
+                    context_text = '\n\n'.join([chunk for chunk, _ in top_chunks])
+
+                    # Generate dialogue
+                    answer = get_character_dialogue(
+                        st.session_state.selected_character_ids,
+                        prompt_input.strip(),
+                        context_text=context_text,
+                        num_turns=num_turns if 'num_turns' in locals() else 2
+                    )
+
+                    # For dialogue, we don't have reasoning/unique files like single mode
+                    reasoning = ""
+                    unique_files = []
+                    chunk_info = []
+                    temperature_info = {'temperature': 0.85, 'source': 'dialogue', 'mode': 'dialogue'}
                 
                 # If successful, update logs and display response
                 encoded_response = update_chat_logs(
@@ -1128,32 +1359,37 @@ if st.button('Submit'):
                 </style>
                 """, unsafe_allow_html=True)
                 
-                # Display reasoning section
-                if reasoning:
-                    st.markdown("""
-                    <div class="reasoning-section">
-                        <p style="color: #4a90e2; font-weight: bold; margin-bottom: 15px;">🤔 Patrick Geddes thinks:</p>
-                        <p style="font-style: italic; color: #495057;">{}</p>
+                # Display response based on conversation mode
+                if conversation_mode == "Single Character":
+                    # Display reasoning section for single character
+                    if reasoning:
+                        st.markdown(f"""
+                        <div class="reasoning-section">
+                            <p style="color: #4a90e2; font-weight: bold; margin-bottom: 15px;">🤔 {html.escape(current_char.get_name())} thinks:</p>
+                            <p style="font-style: italic; color: #495057;">{html.escape(reasoning).replace('\n', '<br>')}</p>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                    # Display answer section
+                    st.markdown(f"### 💭 {current_char.get_name()} says:")
+                    st.markdown(f"_{answer}_")
+
+                    # Display metadata
+                    st.markdown(f"""
+                    <div class="metadata-section">
+                        <p style="color: #666; margin-bottom: 5px;"><strong>📚 Sources:</strong> {' • '.join(html.escape(file) for file in unique_files)}</p>
+                        <p style="color: #666; margin-bottom: 5px;"><strong>🔍 Relevance:</strong> {' • '.join(html.escape(chunk) for chunk in chunk_info)}</p>
+                        <p style="color: #666; margin-bottom: 0;"><strong>🌡️ Temperature:</strong> {temperature_info['temperature']} ({html.escape(temperature_info['source'])})</p>
                     </div>
-                    """.format(html.escape(reasoning).replace('\n', '<br>')), unsafe_allow_html=True)
-                
-                # Display answer section - simplified
-                st.markdown("### 💭 Patrick Geddes says:")
-                st.markdown(f"_{answer}_")
-                
-                # Display metadata in a cleaner format
-                st.markdown("""
-                <div class="metadata-section">
-                    <p style="color: #666; margin-bottom: 5px;"><strong>📚 Sources:</strong> {}</p>
-                    <p style="color: #666; margin-bottom: 5px;"><strong>🔍 Relevance:</strong> {}</p>
-                    <p style="color: #666; margin-bottom: 0;"><strong>🌡️ Temperature:</strong> {} ({})</p>
-                </div>
-                """.format(
-                    ' • '.join(html.escape(file) for file in unique_files),
-                    ' • '.join(html.escape(chunk) for chunk in chunk_info),
-                    temperature_info['temperature'],
-                    html.escape(temperature_info['source'])
-                ), unsafe_allow_html=True)
+                    """, unsafe_allow_html=True)
+
+                elif conversation_mode == "Multiple Perspectives":
+                    # Multi-character response - answer already formatted
+                    st.markdown(answer, unsafe_allow_html=True)
+
+                else:  # Character Dialogue
+                    # Dialogue response - answer already formatted
+                    st.markdown(answer, unsafe_allow_html=True)
                 
             except Exception as e:
                 st.error(f"An error occurred: {str(e)}")
