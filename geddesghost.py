@@ -82,11 +82,18 @@ sound_dir = os.path.join(script_dir, 'sounds')
 prompts_dir = os.path.join(script_dir, 'prompts')
 about_file_path = os.path.join(script_dir, 'about.txt')
 
-# Initialize pygame for audio
-pygame.mixer.init()
-
-# Load sound file
-ding_sound = pygame.mixer.Sound(os.path.join(sound_dir, 'ding2.wav'))
+# Initialize pygame for audio (gracefully handle VPS/headless environments)
+audio_available = False
+ding_sound = None
+try:
+    pygame.mixer.init()
+    ding_sound = pygame.mixer.Sound(os.path.join(sound_dir, 'ding2.wav'))
+    audio_available = True
+    logger.info("Audio initialized successfully")
+except pygame.error as e:
+    logger.warning(f"Audio initialization failed (running in headless/VPS mode): {e}")
+except Exception as e:
+    logger.warning(f"Audio initialization failed: {e}")
 
 # Define constants at the top of the file
 CONTEXT_WEIGHTS = {
@@ -1098,8 +1105,9 @@ if st.button('Submit'):
                     csv_file=csv_file
                 )
 
-                # Play sound only on successful response
-                ding_sound.play()
+                # Play sound only on successful response (if audio is available)
+                if audio_available and ding_sound:
+                    ding_sound.play()
                 
                 # Add custom CSS for the response sections
                 st.markdown("""
