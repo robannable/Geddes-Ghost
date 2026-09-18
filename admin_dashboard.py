@@ -1,5 +1,6 @@
 # admin_dashboard.py
 
+import ast
 import re
 import streamlit as st
 import pandas as pd
@@ -47,11 +48,26 @@ class ResponseEvaluator:
                 'cross-disciplinary': 0
             },
             'temperature_data': [],  # List of {temp, length, markers, mode, source} dicts
-            'temperature_effectiveness': {}  # Dynamic temperature tracking
+            'temperature_effectiveness': {}  # Keyed by the control that shaped the response
         }
         logger.info("ResponseEvaluator initialized")
-    
-    def evaluate_response(self, response: str, mode: str, temperature: float, temperature_source: str = "auto") -> dict:
+
+    @staticmethod
+    def _control_key(temperature=None, effort=None):
+        """Key for the effectiveness table.
+
+        Current Anthropic models reject temperature and take an effort level
+        instead, so the table is keyed by whichever control was actually in
+        play. Numeric temperatures keep their bare-number key so historic logs
+        continue to parse.
+        """
+        if temperature is not None:
+            return temperature
+        if effort is not None:
+            return f"effort={effort}"
+        return "prompt-only"
+
+    def evaluate_response(self, response: str, mode: str, temperature: float = None, temperature_source: str = "auto", effort: str = None) -> dict:
         # Update mode distribution
         self.metrics['mode_distribution'][mode] = self.metrics['mode_distribution'].get(mode, 0) + 1
 
@@ -80,9 +96,12 @@ class ResponseEvaluator:
         words = response.split()
         avg_word_length = sum(len(w) for w in words) / len(words) if words else 0
 
-        # Store comprehensive temperature data
+        # Store comprehensive generation data
+        control_key = self._control_key(temperature, effort)
         temp_data_point = {
             'temperature': temperature,
+            'effort': effort,
+            'control': control_key,
             'length': response_length,
             'markers': current_markers,
             'mode': mode,
@@ -91,10 +110,10 @@ class ResponseEvaluator:
         }
         self.metrics['temperature_data'].append(temp_data_point)
 
-        # Update temperature effectiveness tracking (dynamic)
-        if temperature not in self.metrics['temperature_effectiveness']:
-            self.metrics['temperature_effectiveness'][temperature] = []
-        self.metrics['temperature_effectiveness'][temperature].append(response_length)
+        # Update effectiveness tracking, keyed by the control in play
+        if control_key not in self.metrics['temperature_effectiveness']:
+            self.metrics['temperature_effectiveness'][control_key] = []
+        self.metrics['temperature_effectiveness'][control_key].append(response_length)
 
         # Calculate averages for temperature effectiveness
         temp_effectiveness = {
@@ -201,7 +220,9 @@ def load_response_data(logs_dir):
             # Include both old and new column names
             new_columns = ['cognitive_mode', 'response_length', 'creative_markers', 'temperature',
                           'actual_temperature', 'temperature_source', 'detected_mode',
-                          'model_provider', 'model_name']
+                          'model_provider', 'model_name',
+                          'effort', 'depth', 'input_tokens', 'output_tokens',
+                          'cache_read_input_tokens', 'stop_reason']
             for col in new_columns:
                 if col not in df.columns:
                     df[col] = None
@@ -387,7 +408,7 @@ def display_response_metrics():
             for mode_str in df['cognitive_mode'].dropna():
                 try:
                     if isinstance(mode_str, str) and mode_str.strip():
-                        mode_dict = eval(mode_str.strip())
+                        mode_dict = ast.literal_eval(mode_str.strip())
                         if isinstance(mode_dict, dict):
                             for mode, count in mode_dict.items():
                                 mode_counts[mode] += int(count)
@@ -425,7 +446,7 @@ def display_response_metrics():
         for markers_str in df['creative_markers'].dropna():
             try:
                 if isinstance(markers_str, str) and markers_str.strip():
-                    markers_dict = eval(markers_str.strip())
+                    markers_dict = ast.literal_eval(markers_str.strip())
                     if isinstance(markers_dict, dict):
                         for marker, count in markers_dict.items():
                             marker_counts[marker] += int(count)
@@ -443,34 +464,36 @@ def display_response_metrics():
     except Exception as e:
         logger.error(f"Error processing creative markers: {str(e)}")
     
-    # Temperature impact analysis
+    # Generation control impact analysis
     try:
         temp_data = []
         for idx, row in df.iterrows():
             try:
                 if isinstance(row.get('temperature'), str) and row['temperature'].strip():
-                    temp_dict = eval(row['temperature'].strip())
+                    # literal_eval, not eval: this string comes out of a log file.
+                    temp_dict = ast.literal_eval(row['temperature'].strip())
                     if isinstance(temp_dict, dict):
-                        for temp, length in temp_dict.items():
+                        for control, length in temp_dict.items():
                             try:
                                 value = float(length) if isinstance(length, (int, float)) else float(np.mean(length))
                                 temp_data.append({
-                                    'Temperature': float(temp),
+                                    'Control': str(control),
                                     'Response Length': value,
                                     'Response Number': idx + 1
                                 })
-                            except:
+                            except (TypeError, ValueError):
                                 continue
-            except:
+            except (ValueError, SyntaxError):
                 continue
-        
+
         if temp_data:
             temp_df = pd.DataFrame(temp_data)
             fig = px.line(temp_df, x='Response Number', y='Response Length',
-                         title="Temperature Impact on Response Length")
+                         color='Control',
+                         title="Generation Control Impact on Response Length")
             st.plotly_chart(fig)
     except Exception as e:
-        logger.error(f"Error processing temperature impact: {str(e)}")
+        logger.error(f"Error processing generation control impact: {str(e)}")
 
 def create_performance_dashboard(df):
     st.header("System Performance Analytics")
@@ -973,181 +996,237 @@ def create_interventions(df):
         mime="text/plain"
     )
 
-def create_temperature_analysis(df):
-    """Comprehensive temperature analysis tab"""
-    st.header("Temperature Analysis")
+def create_depth_analysis(df):
+    """Response depth analysis: temperature, effort, and token spend.
 
-    # Check if we have temperature data
-    if 'actual_temperature' not in df.columns or 'temperature_source' not in df.columns:
-        st.warning("Temperature tracking data not available. Please use the system with the updated version to collect this data.")
+    Temperature was the only depth control when this dashboard was written.
+    Current Anthropic models reject it and take output_config.effort instead,
+    so the analysis is keyed on the provider-neutral `depth` band and the
+    temperature and effort sections render only where that data exists.
+    """
+    st.header("Response Depth Analysis")
+
+    required = {'temperature_source', 'response_length'}
+    if not required.issubset(df.columns):
+        st.warning("Depth tracking data not available. Please use the system with the updated version to collect this data.")
         return
 
-    # Clean the data
-    temp_df = df[['actual_temperature', 'temperature_source', 'response_length',
-                   'detected_mode', 'creative_markers', 'date']].copy()
-    temp_df = temp_df.dropna(subset=['actual_temperature'])
+    columns = [c for c in ['actual_temperature', 'effort', 'depth', 'temperature_source',
+                           'response_length', 'detected_mode', 'creative_markers', 'date',
+                           'input_tokens', 'output_tokens', 'cache_read_input_tokens',
+                           'model_name'] if c in df.columns]
+    depth_df = df[columns].copy()
 
-    if temp_df.empty:
-        st.info("No temperature data available yet. Start using the system to collect data.")
+    if 'depth' not in depth_df.columns:
+        depth_df['depth'] = None
+    # Older logs predate the depth column: derive it from temperature so the
+    # historic record still charts.
+    if 'actual_temperature' in depth_df.columns:
+        numeric_temp = pd.to_numeric(depth_df['actual_temperature'], errors='coerce')
+        derived = numeric_temp.apply(
+            lambda t: None if pd.isna(t) else ('expansive' if t >= 0.85 else ('focused' if t <= 0.5 else 'balanced'))
+        )
+        depth_df['depth'] = depth_df['depth'].fillna(derived)
+
+    depth_df = depth_df.dropna(subset=['response_length'])
+    if depth_df.empty:
+        st.info("No depth data available yet. Start using the system to collect data.")
         return
 
-    # Convert temperature to float
-    temp_df['actual_temperature'] = pd.to_numeric(temp_df['actual_temperature'], errors='coerce')
-    temp_df = temp_df.dropna(subset=['actual_temperature'])
+    depth_df['response_length'] = pd.to_numeric(depth_df['response_length'], errors='coerce')
+    depth_df = depth_df.dropna(subset=['response_length'])
 
-    # Section 1: Temperature Distribution
-    st.subheader("1. Temperature Distribution")
+    # Section 1: Depth distribution
+    st.subheader("1. Depth Distribution")
     col1, col2 = st.columns(2)
 
     with col1:
-        # Overall distribution
-        fig = px.histogram(temp_df, x='actual_temperature', nbins=20,
-                          title="Temperature Distribution",
-                          labels={'actual_temperature': 'Temperature', 'count': 'Frequency'},
-                          color='temperature_source',
-                          barmode='overlay')
-        st.plotly_chart(fig, use_container_width=True)
+        band_counts = depth_df['depth'].dropna().value_counts().reset_index()
+        band_counts.columns = ['Depth', 'Count']
+        if not band_counts.empty:
+            fig = px.bar(band_counts, x='Depth', y='Count', title="Responses by Depth Band")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No depth bands recorded yet.")
 
     with col2:
-        # Auto vs Manual breakdown
-        mode_counts = temp_df['temperature_source'].value_counts().reset_index()
+        mode_counts = depth_df['temperature_source'].dropna().value_counts().reset_index()
         mode_counts.columns = ['Mode', 'Count']
-        fig = px.pie(mode_counts, values='Count', names='Mode',
-                    title="Auto vs Manual Mode Usage")
-        st.plotly_chart(fig, use_container_width=True)
-
-    # Section 2: Temperature vs Response Characteristics
-    st.subheader("2. Temperature Impact on Response Characteristics")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        # Temperature vs Response Length
-        fig = px.scatter(temp_df, x='actual_temperature', y='response_length',
-                        color='temperature_source',
-                        title="Temperature vs Response Length",
-                        labels={'actual_temperature': 'Temperature',
-                               'response_length': 'Response Length (words)'})
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col2:
-        # Creative markers analysis
-        marker_data = []
-        for idx, row in temp_df.iterrows():
-            try:
-                markers_str = row.get('creative_markers', '{}')
-                if isinstance(markers_str, str) and markers_str.strip():
-                    markers_dict = eval(markers_str.strip())
-                    if isinstance(markers_dict, dict):
-                        total_markers = sum(markers_dict.values())
-                        marker_data.append({
-                            'temperature': row['actual_temperature'],
-                            'markers': total_markers,
-                            'source': row['temperature_source']
-                        })
-            except:
-                continue
-
-        if marker_data:
-            marker_df = pd.DataFrame(marker_data)
-            fig = px.scatter(marker_df, x='temperature', y='markers',
-                           color='source',
-                           title="Temperature vs Creative Markers",
-                           labels={'temperature': 'Temperature',
-                                  'markers': 'Creative Markers Count'})
+        if not mode_counts.empty:
+            fig = px.pie(mode_counts, values='Count', names='Mode',
+                         title="Auto vs Manual Control")
             st.plotly_chart(fig, use_container_width=True)
 
-    # Section 3: Auto vs Manual Comparison
-    st.subheader("3. Auto vs Manual Mode Comparison")
+    # Section 2: Depth against response characteristics
+    st.subheader("2. Depth Impact on Response Characteristics")
+    band_stats = depth_df.dropna(subset=['depth']).groupby('depth').agg(
+        avg_length=('response_length', 'mean'),
+        responses=('response_length', 'count')
+    ).round(1).reset_index()
+    if not band_stats.empty:
+        st.dataframe(band_stats, use_container_width=True)
 
-    auto_data = temp_df[temp_df['temperature_source'].str.contains('auto', case=False, na=False)]
-    manual_data = temp_df[temp_df['temperature_source'] == 'manual']
+    marker_data = []
+    for _, row in depth_df.iterrows():
+        try:
+            markers_str = row.get('creative_markers', '{}')
+            if isinstance(markers_str, str) and markers_str.strip():
+                markers_dict = ast.literal_eval(markers_str.strip())
+                if isinstance(markers_dict, dict):
+                    marker_data.append({
+                        'depth': row.get('depth'),
+                        'markers': sum(markers_dict.values()),
+                        'source': row.get('temperature_source')
+                    })
+        except (ValueError, SyntaxError):
+            continue
 
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        st.metric("Auto Mode Responses", len(auto_data))
-        if not auto_data.empty:
-            st.metric("Avg Temperature", f"{auto_data['actual_temperature'].mean():.2f}")
-            st.metric("Avg Length", f"{auto_data['response_length'].mean():.0f} words")
-
-    with col2:
-        st.metric("Manual Mode Responses", len(manual_data))
-        if not manual_data.empty:
-            st.metric("Avg Temperature", f"{manual_data['actual_temperature'].mean():.2f}")
-            st.metric("Avg Length", f"{manual_data['response_length'].mean():.0f} words")
-
-    with col3:
-        if not auto_data.empty and not manual_data.empty:
-            temp_diff = manual_data['actual_temperature'].mean() - auto_data['actual_temperature'].mean()
-            length_diff = manual_data['response_length'].mean() - auto_data['response_length'].mean()
-            st.metric("Temperature Difference", f"{temp_diff:+.2f}")
-            st.metric("Length Difference", f"{length_diff:+.0f} words")
-
-    # Section 4: Temperature Trends Over Time
-    st.subheader("4. Temperature Trends Over Time")
-
-    if 'date' in temp_df.columns:
-        temp_df['date'] = pd.to_datetime(temp_df['date'], errors='coerce')
-        temp_df_sorted = temp_df.sort_values('date').dropna(subset=['date'])
-
-        if not temp_df_sorted.empty:
-            fig = px.line(temp_df_sorted, x='date', y='actual_temperature',
-                         color='temperature_source',
-                         title="Temperature Usage Over Time",
-                         labels={'date': 'Date', 'actual_temperature': 'Temperature'})
+    if marker_data:
+        marker_df = pd.DataFrame(marker_data).dropna(subset=['depth'])
+        if not marker_df.empty:
+            fig = px.box(marker_df, x='depth', y='markers',
+                         title="Depth vs Creative Markers",
+                         labels={'depth': 'Depth Band', 'markers': 'Creative Markers Count'})
             st.plotly_chart(fig, use_container_width=True)
 
-    # Section 5: Temperature Effectiveness Matrix
-    st.subheader("5. Temperature Effectiveness Matrix")
+    # Section 3: Effort (current Anthropic models)
+    effort_df = pd.DataFrame()
+    if 'effort' in depth_df.columns:
+        effort_df = depth_df.dropna(subset=['effort'])
+        effort_df = effort_df[effort_df['effort'].astype(str).str.strip() != '']
 
-    # Create temperature bins
-    temp_df['temp_range'] = pd.cut(temp_df['actual_temperature'],
-                                    bins=[0, 0.3, 0.6, 0.8, 1.0],
-                                    labels=['0.0-0.3', '0.4-0.6', '0.7-0.8', '0.9-1.0'])
+    st.subheader("3. Effort Levels")
+    if effort_df.empty:
+        st.info("No effort data recorded. Effort applies to models that accept output_config.effort.")
+    else:
+        col1, col2 = st.columns(2)
+        with col1:
+            counts = effort_df['effort'].value_counts().reset_index()
+            counts.columns = ['Effort', 'Count']
+            fig = px.bar(counts, x='Effort', y='Count', title="Effort Level Usage")
+            st.plotly_chart(fig, use_container_width=True)
+        with col2:
+            fig = px.box(effort_df, x='effort', y='response_length',
+                         title="Effort vs Response Length",
+                         labels={'effort': 'Effort', 'response_length': 'Response Length (words)'})
+            st.plotly_chart(fig, use_container_width=True)
 
-    effectiveness = temp_df.groupby('temp_range').agg({
-        'response_length': ['mean', 'count']
-    }).round(1)
+    # Section 4: Temperature (legacy and Ollama)
+    temp_df = pd.DataFrame()
+    if 'actual_temperature' in depth_df.columns:
+        temp_df = depth_df.copy()
+        temp_df['actual_temperature'] = pd.to_numeric(temp_df['actual_temperature'], errors='coerce')
+        temp_df = temp_df.dropna(subset=['actual_temperature'])
 
-    effectiveness.columns = ['Avg Length', 'Count']
-    effectiveness = effectiveness.reset_index()
+    st.subheader("4. Temperature")
+    if temp_df.empty:
+        st.info("No temperature data recorded. Current Anthropic models do not accept a temperature setting.")
+    else:
+        col1, col2 = st.columns(2)
+        with col1:
+            fig = px.histogram(temp_df, x='actual_temperature', nbins=20,
+                               title="Temperature Distribution",
+                               labels={'actual_temperature': 'Temperature'},
+                               color='temperature_source', barmode='overlay')
+            st.plotly_chart(fig, use_container_width=True)
+        with col2:
+            fig = px.scatter(temp_df, x='actual_temperature', y='response_length',
+                             color='temperature_source',
+                             title="Temperature vs Response Length",
+                             labels={'actual_temperature': 'Temperature',
+                                     'response_length': 'Response Length (words)'})
+            st.plotly_chart(fig, use_container_width=True)
 
-    st.dataframe(effectiveness, use_container_width=True)
+    # Section 5: Token spend
+    st.subheader("5. Token Spend")
+    token_columns = [c for c in ['input_tokens', 'output_tokens', 'cache_read_input_tokens']
+                     if c in depth_df.columns]
+    token_df = pd.DataFrame()
+    if token_columns:
+        token_df = depth_df.copy()
+        for col in token_columns:
+            token_df[col] = pd.to_numeric(token_df[col], errors='coerce')
+        token_df = token_df.dropna(subset=['output_tokens'] if 'output_tokens' in token_columns else token_columns, how='all')
 
-    # Section 6: Insights and Recommendations
-    st.subheader("6. Insights & Recommendations")
+    if token_df.empty:
+        st.info("No token usage recorded. Usage is logged from the provider response on each request.")
+    else:
+        cols = st.columns(len(token_columns) + 1)
+        for i, col in enumerate(token_columns):
+            with cols[i]:
+                total = token_df[col].sum()
+                st.metric(col.replace('_', ' ').title(), f"{total:,.0f}")
+        with cols[-1]:
+            if 'output_tokens' in token_columns:
+                st.metric("Avg Output / Response", f"{token_df['output_tokens'].mean():,.0f}")
 
+        group_key = 'effort' if not effort_df.empty else 'depth'
+        if group_key in token_df.columns and 'output_tokens' in token_columns:
+            spend = token_df.dropna(subset=[group_key]).groupby(group_key).agg(
+                avg_output_tokens=('output_tokens', 'mean'),
+                responses=('output_tokens', 'count')
+            ).round(1).reset_index()
+            if not spend.empty:
+                fig = px.bar(spend, x=group_key, y='avg_output_tokens',
+                             title=f"Average Output Tokens by {group_key.title()}")
+                st.plotly_chart(fig, use_container_width=True)
+
+    # Section 6: Trends over time
+    st.subheader("6. Depth Over Time")
+    if 'date' in depth_df.columns:
+        trend_df = depth_df.copy()
+        trend_df['date'] = pd.to_datetime(trend_df['date'], errors='coerce')
+        trend_df = trend_df.dropna(subset=['date', 'depth'])
+        if not trend_df.empty:
+            daily = trend_df.groupby([trend_df['date'].dt.date, 'depth']).size().reset_index(name='count')
+            daily.columns = ['date', 'depth', 'count']
+            fig = px.line(daily, x='date', y='count', color='depth',
+                          title="Depth Band Usage Over Time")
+            st.plotly_chart(fig, use_container_width=True)
+
+    # Section 7: Insights
+    st.subheader("7. Insights & Recommendations")
     insights = []
     recommendations = []
 
-    # Calculate insights
-    if not temp_df.empty:
-        auto_pct = (len(auto_data) / len(temp_df) * 100) if len(temp_df) > 0 else 0
-        insights.append(f"📊 {auto_pct:.1f}% of queries use Auto mode (cognitive system)")
+    auto_data = depth_df[depth_df['temperature_source'].str.contains('auto', case=False, na=False)]
+    manual_data = depth_df[depth_df['temperature_source'].str.contains('manual', case=False, na=False)]
 
-        if not manual_data.empty and not auto_data.empty:
-            length_increase = ((manual_data['response_length'].mean() - auto_data['response_length'].mean()) /
-                              auto_data['response_length'].mean() * 100)
-            insights.append(f"📊 Manual mode responses are {abs(length_increase):.0f}% {'longer' if length_increase > 0 else 'shorter'} on average")
+    if len(depth_df) > 0:
+        auto_pct = len(auto_data) / len(depth_df) * 100
+        insights.append(f"\U0001f4ca {auto_pct:.1f}% of queries use Auto mode (cognitive system)")
 
-        # Find most common temperature ranges
-        most_common = temp_df['temp_range'].value_counts()
-        if not most_common.empty:
-            insights.append(f"📊 Most common temperature range: {most_common.index[0]} ({most_common.values[0]} uses)")
+        if not manual_data.empty and not auto_data.empty and auto_data['response_length'].mean():
+            length_change = ((manual_data['response_length'].mean() - auto_data['response_length'].mean())
+                             / auto_data['response_length'].mean() * 100)
+            insights.append(
+                f"\U0001f4ca Manual mode responses are {abs(length_change):.0f}% "
+                f"{'longer' if length_change > 0 else 'shorter'} on average"
+            )
 
-        # Recommendations based on patterns
+        common_depth = depth_df['depth'].dropna().value_counts()
+        if not common_depth.empty:
+            insights.append(f"\U0001f4ca Most common depth band: {common_depth.index[0]} ({common_depth.values[0]} uses)")
+
         if auto_pct > 80:
-            recommendations.append("💡 High Auto mode usage suggests users trust the cognitive mode system")
+            recommendations.append("\U0001f4a1 High Auto mode usage suggests users trust the cognitive mode system")
         elif auto_pct < 30:
-            recommendations.append("💡 Low Auto mode usage - consider reviewing cognitive mode defaults")
+            recommendations.append("\U0001f4a1 Low Auto mode usage - consider reviewing cognitive mode defaults")
 
-        if not manual_data.empty:
-            high_manual = manual_data[manual_data['actual_temperature'] > 0.85]
-            if len(high_manual) > len(manual_data) * 0.5:
-                recommendations.append("💡 Users frequently choose high temperatures manually - consider if default modes should be more creative")
+    if not effort_df.empty and not temp_df.empty:
+        recommendations.append(
+            "\U0001f4a1 Logs mix temperature and effort controls. Compare within a control, not across them."
+        )
 
-    # Display insights
+    if not token_df.empty and 'output_tokens' in token_df.columns:
+        heaviest = token_df.dropna(subset=['output_tokens'])
+        if 'model_name' in heaviest.columns and not heaviest.empty:
+            by_model = heaviest.groupby('model_name')['output_tokens'].mean().sort_values(ascending=False)
+            if not by_model.empty:
+                insights.append(
+                    f"\U0001f4ca Highest average output: {by_model.index[0]} ({by_model.iloc[0]:,.0f} tokens)"
+                )
+
     if insights:
         st.markdown("**Insights:**")
         for insight in insights:
@@ -1174,7 +1253,7 @@ def main():
     
     # Create tabs for different analyses
     tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
-        "Performance", "Document Usage", "User Analysis", "Response Metrics", "Temperature Analysis", "Topics Map", "Conversation Insights", "Interventions"
+        "Performance", "Document Usage", "User Analysis", "Response Metrics", "Response Depth", "Topics Map", "Conversation Insights", "Interventions"
     ])
 
     with tab1:
@@ -1190,7 +1269,7 @@ def main():
         display_response_metrics()
 
     with tab5:
-        create_temperature_analysis(df)
+        create_depth_analysis(df)
 
     with tab6:
         create_topics_map(df)
