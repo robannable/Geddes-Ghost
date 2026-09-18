@@ -22,7 +22,7 @@ When you use the chat interface, the program:
 - Formats the response to be clear and readable
 - Keeps track of your conversation history
 
-The program can use different AI models (currently Anthropic and Ollama) to generate responses. This flexibility allows for different styles of interaction and helps ensure the system keeps working even if one service has issues. Each model declares which generation settings it accepts, so the controls shown in the sidebar match what the chosen model can actually do.
+The program can use different AI models (currently Anthropic, OpenRouter and Ollama) to generate responses. OpenRouter is a gateway: one key reaches several hundred models from many vendors, which is useful for comparing how different models inhabit the persona. This flexibility allows for different styles of interaction and helps ensure the system keeps working even if one service has issues. Each model declares which generation settings it accepts, so the controls shown in the sidebar match what the chosen model can actually do.
 
 ### Understanding the Responses
 
@@ -83,7 +83,14 @@ For each response, a small dictionary is logged in `creative_markers` counting o
 Temperature used to be the only depth control. Anthropic removed the sampling
 parameters (`temperature`, `top_p`, `top_k`) from Opus 4.7 onwards - sending any
 of them to a current model returns a 400 - and replaced them with
-`output_config.effort`. Ollama and older Claude models still take temperature.
+`output_config.effort`. OpenRouter exposes the same idea across vendors as
+`reasoning.effort`. Ollama and older Claude models still take temperature.
+
+Which control is available is a property of the chosen model, and each provider
+reports it differently: Anthropic's is declared in `ANTHROPIC_MODELS`,
+OpenRouter's comes from the `supported_parameters` array in its own model
+listing, and Ollama passes sampling options straight through. Where a model
+accepts both, effort is preferred.
 
 The system therefore records a provider-neutral **depth band** alongside
 whichever control was actually sent:
@@ -93,8 +100,9 @@ whichever control was actually sent:
 - `effort`: the effort level sent, where the model accepts one.
 - `temperature_source`: whether the control came from the cognitive mode (auto)
   or the sidebar (manual).
-- `model_provider` and `model_name`: e.g. Anthropic / Claude variant, or Ollama
-  / local model. The dashboard shows usage distribution across models.
+- `model_provider` and `model_name`: e.g. Anthropic / Claude variant,
+  OpenRouter / any gateway model, or Ollama / local model. The dashboard shows
+  usage distribution across models.
 
 Cognitive modes map onto depth as follows:
 
@@ -145,7 +153,8 @@ This information helps us improve the system and understand how people are engag
 The program is built using:
 - Python as the main programming language
 - Streamlit for the user interface
-- Various AI services for generating responses
+- Various AI services for generating responses, reached either directly
+  (Anthropic, a local Ollama server) or through the OpenRouter gateway
 - A system for storing and retrieving information from Geddes' writings
 
 ## Future Plans

@@ -340,10 +340,33 @@ ANTHROPIC_MODELS = {
     },
 }
 
+# OpenRouter normalises reasoning depth across providers as
+# `reasoning: {"effort": ...}`. Its model listing reports *whether* a model
+# accepts the reasoning parameter but not which effort values, and an
+# unsupported value is rejected with a 400. low/medium/high is the set every
+# reasoning model accepts, so it is the default here. Widen it for a specific
+# model with OPENROUTER_EFFORT_OVERRIDES if you know it takes xhigh or max.
+OPENROUTER_EFFORT_LEVELS = ["low", "medium", "high"]
+
+OPENROUTER_EFFORT_OVERRIDES = {
+    # "anthropic/claude-opus-5": EFFORT_LEVELS_FULL,
+}
+
 UNKNOWN_MODEL_CAPABILITIES = {
     "display_name": None,
     "sampling": False,
     "effort_levels": [],
+}
+
+DISCOVERY_STATE_KEYS = {
+    "anthropic": "discovered_anthropic_models",
+    "openrouter": "discovered_openrouter_models",
+}
+
+PROVIDER_DISPLAY_NAMES = {
+    "anthropic": "Anthropic",
+    "openrouter": "OpenRouter",
+    "ollama": "Ollama (local)",
 }
 
 
@@ -357,15 +380,42 @@ def get_model_capabilities(provider, model):
         # Ollama passes sampling options straight through to the local runtime.
         return {"display_name": model, "sampling": True, "effort_levels": []}
 
-    discovered = st.session_state.get("discovered_anthropic_models", {})
+    state_key = DISCOVERY_STATE_KEYS.get(provider)
+    discovered = st.session_state.get(state_key, {}) if state_key else {}
     if model in discovered:
         return discovered[model]
-    if model in ANTHROPIC_MODELS:
+    if provider == "anthropic" and model in ANTHROPIC_MODELS:
         return ANTHROPIC_MODELS[model]
 
     caps = dict(UNKNOWN_MODEL_CAPABILITIES)
     caps["display_name"] = model
     return caps
+
+
+def clamp_effort(requested, available):
+    """Pick the highest offered effort level not exceeding the requested one.
+
+    Providers expose different slices of the ladder. Clamping downward keeps
+    the ordering between cognitive modes intact instead of collapsing them all
+    onto a single fallback level.
+    """
+    if not available:
+        return None
+    if requested in available:
+        return requested
+    if requested not in EFFORT_LEVELS_FULL:
+        # An unrecognised value is not worth guessing at: omit the parameter
+        # and let the provider apply its own default.
+        return None
+    ceiling = EFFORT_LEVELS_FULL.index(requested)
+    candidates = [
+        level for level in available
+        if level in EFFORT_LEVELS_FULL and EFFORT_LEVELS_FULL.index(level) <= ceiling
+    ]
+    if candidates:
+        return max(candidates, key=EFFORT_LEVELS_FULL.index)
+    return min(available, key=lambda lvl: EFFORT_LEVELS_FULL.index(lvl)
+               if lvl in EFFORT_LEVELS_FULL else 99)
 
 
 # Load model config from file or notepad (for now, hardcode as a dict)
@@ -375,7 +425,12 @@ MODEL_CONFIG = {
         "anthropic": {
             "provider": "anthropic",
             "model": "claude-sonnet-5",
-            "max_tokens": 4000,
+            # Thinking tokens are drawn from the same max_tokens budget as the
+            # answer, so a 4000 ceiling at high effort can leave very little
+            # room for the reply itself. This is a ceiling, not a target - the
+            # system prompt governs length - and it stays under the HTTP
+            # timeout for a non-streaming request.
+            "max_tokens": 16000,
             # Only used by models that still accept sampling parameters.
             "temperature": 0.7,
             # Used by models that accept output_config.effort.
@@ -387,6 +442,28 @@ MODEL_CONFIG = {
             "headers": {
                 "Content-Type": "application/json",
                 "anthropic-version": "2023-06-01"
+            }
+        },
+        "openrouter": {
+            "provider": "openrouter",
+            # OpenRouter fronts many providers behind one OpenAI-compatible
+            # endpoint. Which controls a given model accepts is reported by its
+            # listing, so capabilities are discovered rather than declared here.
+            "model": "anthropic/claude-sonnet-5",
+            # As above: OpenRouter derives a reasoning budget from max_tokens
+            # (roughly 0.8 of it at high effort), so this needs headroom.
+            "max_tokens": 16000,
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "effort": "high",
+            "api_endpoint": "https://openrouter.ai/api/v1/chat/completions",
+            "models_endpoint": "https://openrouter.ai/api/v1/models",
+            "api_key_env": "OPENROUTER_API_KEY",
+            "headers": {
+                "Content-Type": "application/json",
+                # Optional attribution headers used by OpenRouter's rankings.
+                "HTTP-Referer": "https://github.com/robannable/Geddes-Ghost",
+                "X-Title": "GeddesGhost"
             }
         },
         "ollama": {
@@ -405,6 +482,10 @@ MODEL_CONFIG = {
     # (connect, read) seconds. Without this a stalled connection hangs Streamlit
     # indefinitely.
     "timeout": (10, 120),
+    # Model discovery runs while the sidebar is drawing, so it gets a short
+    # budget and no retries: a slow or unreachable catalogue should degrade to
+    # the fallback list quickly rather than block the page.
+    "discovery_timeout": (5, 15),
 }
 
 
@@ -450,10 +531,15 @@ class ModelAPIHandler:
         self.timeout = config.get("timeout", (10, 120))
         self.headers = self.provider_config["headers"].copy()
         if self.api_key:
-            # Add API key to headers if needed
+            # Each gateway names its auth header differently.
             if self.provider == "anthropic":
                 self.headers["x-api-key"] = self.api_key
+            elif self.provider == "openrouter":
+                self.headers["Authorization"] = f"Bearer {self.api_key}"
         self.session = build_http_session()
+        # Discovery deliberately does not share the retrying session.
+        self.discovery_session = requests.Session()
+        self.discovery_timeout = config.get("discovery_timeout", (5, 15))
 
     @property
     def capabilities(self):
@@ -462,9 +548,9 @@ class ModelAPIHandler:
     def get_available_ollama_models(self):
         """Fetch available models from Ollama server"""
         try:
-            response = self.session.get(
+            response = self.discovery_session.get(
                 self.provider_config.get("models_endpoint", "http://localhost:11434/api/tags"),
-                timeout=self.timeout,
+                timeout=self.discovery_timeout,
             )
             if response.status_code == 200:
                 models = response.json().get("models", [])
@@ -487,7 +573,9 @@ class ModelAPIHandler:
         if not endpoint or not self.api_key:
             return {}
         try:
-            response = self.session.get(endpoint, headers=self.headers, timeout=self.timeout)
+            response = self.discovery_session.get(
+                endpoint, headers=self.headers, timeout=self.discovery_timeout
+            )
             response.raise_for_status()
             payload = response.json()
         except Exception as e:
@@ -517,9 +605,89 @@ class ModelAPIHandler:
             }
         return discovered
 
+    def get_available_openrouter_models(self):
+        """Fetch the OpenRouter catalogue and derive capabilities from it.
+
+        Each entry carries `supported_parameters`, which names the OpenAI
+        compatible parameters that model accepts - so unlike Anthropic, the
+        capability declaration comes from the provider rather than from a list
+        maintained here. The listing is public, so it works without a key and
+        the sidebar can be browsed before one is configured.
+        """
+        endpoint = self.provider_config.get("models_endpoint")
+        if not endpoint:
+            return {}
+        try:
+            response = self.discovery_session.get(
+                endpoint, headers=self.headers, timeout=self.discovery_timeout
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as e:
+            logger.error(f"Error fetching OpenRouter models: {str(e)}")
+            return {}
+
+        discovered = {}
+        for entry in payload.get("data", []) or []:
+            model_id = entry.get("id")
+            if not model_id:
+                continue
+            supported = entry.get("supported_parameters") or []
+            effort_levels = []
+            if "reasoning" in supported:
+                effort_levels = OPENROUTER_EFFORT_OVERRIDES.get(
+                    model_id, OPENROUTER_EFFORT_LEVELS
+                )
+            pricing = entry.get("pricing") or {}
+            discovered[model_id] = {
+                "display_name": entry.get("name") or model_id,
+                "sampling": "temperature" in supported,
+                "effort_levels": list(effort_levels),
+                "supported_parameters": supported,
+                "context_length": entry.get("context_length"),
+                "prompt_price": pricing.get("prompt"),
+                "completion_price": pricing.get("completion"),
+            }
+        return discovered
+
+    def discover_models(self):
+        """Fetch the catalogue for whichever provider is selected."""
+        if self.provider == "anthropic":
+            return self.get_available_anthropic_models()
+        if self.provider == "openrouter":
+            return self.get_available_openrouter_models()
+        return {}
+
+    def resolve_controls(self, temperature=None, effort=None):
+        """Decide which generation controls this request may carry.
+
+        Two rules, both there to avoid a 400 or a contradictory request:
+        a control is sent only where the model's capabilities say it is
+        accepted, and temperature is not quietly added from config when effort
+        is already driving the response.
+        """
+        caps = self.capabilities
+
+        resolved_effort = None
+        if caps.get("effort_levels"):
+            resolved_effort = clamp_effort(
+                effort or self.provider_config.get("effort"),
+                caps["effort_levels"],
+            )
+
+        resolved_temperature = None
+        if caps.get("sampling") and not (resolved_effort and temperature is None):
+            resolved_temperature = (
+                temperature if temperature is not None
+                else self.provider_config.get("temperature")
+            )
+
+        return resolved_temperature, resolved_effort
+
     def build_payload(self, prompt, system_prompt=None, temperature=None, effort=None):
         """Assemble a provider-specific request body from the model's capabilities."""
         caps = self.capabilities
+        resolved_temperature, resolved_effort = self.resolve_controls(temperature, effort)
 
         if self.provider == "anthropic":
             payload = {
@@ -531,25 +699,36 @@ class ModelAPIHandler:
             }
             if system_prompt:
                 payload["system"] = system_prompt
-            # Send temperature only where it is still accepted, and never
-            # alongside top_p: passing both errors on every Claude 4+ model.
-            if caps.get("sampling"):
-                effective_temperature = (
-                    temperature if temperature is not None
-                    else self.provider_config.get("temperature")
-                )
-                if effective_temperature is not None:
-                    payload["temperature"] = effective_temperature
+            # Never alongside top_p: passing both errors on every Claude 4+ model.
+            if resolved_temperature is not None:
+                payload["temperature"] = resolved_temperature
             # Effort replaces temperature as the depth control on current models.
-            if caps.get("effort_levels"):
-                effective_effort = effort or self.provider_config.get("effort")
-                if effective_effort in caps["effort_levels"]:
-                    payload["output_config"] = {"effort": effective_effort}
+            if resolved_effort:
+                payload["output_config"] = {"effort": resolved_effort}
+            return payload
+
+        if self.provider == "openrouter":
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
+            payload = {
+                "model": self.provider_config["model"],
+                "max_tokens": self.provider_config["max_tokens"],
+                "messages": messages,
+            }
+            # Same rule as Anthropic: a control goes in only where the model's
+            # own listing says it is accepted. OpenRouter rejects an
+            # unsupported reasoning effort with a 400.
+            if resolved_temperature is not None:
+                payload["temperature"] = resolved_temperature
+            if resolved_effort:
+                payload["reasoning"] = {"effort": resolved_effort}
             return payload
 
         if self.provider == "ollama":
             effective_temperature = (
-                temperature if temperature is not None
+                resolved_temperature if resolved_temperature is not None
                 else self.provider_config.get("temperature", 0.7)
             )
             return {
@@ -594,6 +773,8 @@ class ModelAPIHandler:
 
         if self.provider == "anthropic":
             return self._parse_anthropic_response(data)
+        if self.provider == "openrouter":
+            return self._parse_openrouter_response(data)
         return self._parse_ollama_response(data)
 
     def _parse_anthropic_response(self, data):
@@ -635,6 +816,55 @@ class ModelAPIHandler:
             raw=data,
         )
 
+    def _parse_openrouter_response(self, data):
+        """Parse an OpenAI-shaped chat completion.
+
+        OpenRouter can report an upstream failure inside a 200 body, so the
+        error key is checked before the choices are read.
+        """
+        if isinstance(data.get("error"), dict):
+            message = data["error"].get("message") or str(data["error"])
+            raise ValueError(f"OpenRouter returned an error: {message}")
+
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            logger.error(f"Unexpected OpenRouter response format: {data}")
+            raise ValueError(f"Unexpected OpenRouter API response format: {data}")
+
+        choice = choices[0] or {}
+        finish_reason = choice.get("finish_reason")
+        if finish_reason == "content_filter":
+            raise ValueError("The model declined to answer this request (content filter).")
+
+        message = choice.get("message") or {}
+        text = message.get("content")
+        if not isinstance(text, str):
+            # Some providers return content as a list of parts.
+            if isinstance(text, list):
+                text = " ".join(
+                    part.get("text", "") for part in text
+                    if isinstance(part, dict) and "text" in part
+                )
+            else:
+                text = ""
+
+        if finish_reason == "length":
+            logger.warning("Response truncated: hit max_tokens")
+
+        usage = data.get("usage") or {}
+        return ModelResponse(
+            text=text.strip(),
+            usage={
+                "input_tokens": usage.get("prompt_tokens"),
+                "output_tokens": usage.get("completion_tokens"),
+                "cache_read_input_tokens": (usage.get("prompt_tokens_details") or {}).get("cached_tokens"),
+            },
+            # Normalise to the vocabulary the rest of the app already uses.
+            stop_reason="max_tokens" if finish_reason == "length" else finish_reason,
+            model=data.get("model"),
+            raw=data,
+        )
+
     def _parse_ollama_response(self, data):
         if not isinstance(data, dict) or "response" not in data:
             logger.error(f"Unexpected Ollama response format: {data}")
@@ -661,8 +891,8 @@ def check_api_connection():
         endpoint = api_handler.provider_config.get("models_endpoint")
         if not endpoint:
             return False
-        response = api_handler.session.get(
-            endpoint, headers=api_handler.headers, timeout=api_handler.timeout
+        response = api_handler.discovery_session.get(
+            endpoint, headers=api_handler.headers, timeout=api_handler.discovery_timeout
         )
         return response.status_code == 200
     except Exception as e:
@@ -1173,21 +1403,27 @@ def get_ai_response(user_name, prompt, manual_temperature=None, manual_effort=No
         effective_temperature = None
         effective_effort = None
 
-        if supports_sampling:
+        # Effort is preferred where a model offers both: it describes how much
+        # thinking an answer deserves, which is what survey/synthesis/
+        # proposition actually distinguishes. Temperature is the fallback for
+        # models that take nothing else.
+        if supports_effort:
+            if manual_effort is not None:
+                effective_effort = clamp_effort(manual_effort, capabilities['effort_levels'])
+                control_source = "manual (effort)"
+            else:
+                # Clamp rather than fall back, so the ordering between
+                # cognitive modes survives a provider offering a shorter ladder.
+                effective_effort = clamp_effort(
+                    mode_params['effort'], capabilities['effort_levels']
+                )
+                control_source = f"auto ({selected_mode})"
+        elif supports_sampling:
             if manual_temperature is not None:
                 effective_temperature = manual_temperature
                 control_source = "manual (temperature)"
             else:
                 effective_temperature = mode_params['temperature']
-                control_source = f"auto ({selected_mode})"
-        elif supports_effort:
-            if manual_effort is not None:
-                effective_effort = manual_effort
-                control_source = "manual (effort)"
-            else:
-                effective_effort = mode_params['effort']
-                if effective_effort not in capabilities['effort_levels']:
-                    effective_effort = 'high'
                 control_source = f"auto ({selected_mode})"
         else:
             # No generation controls available on this model: the prompt does
@@ -1355,9 +1591,10 @@ else:
 # Model selection dropdown
 st.sidebar.header("Model Settings")
 selected_provider = st.sidebar.selectbox(
-    "Select AI Model",
+    "Select AI Provider",
     options=list(MODEL_CONFIG["providers"].keys()),
-    index=list(MODEL_CONFIG["providers"].keys()).index(MODEL_CONFIG["current_provider"])
+    index=list(MODEL_CONFIG["providers"].keys()).index(MODEL_CONFIG["current_provider"]),
+    format_func=lambda key: PROVIDER_DISPLAY_NAMES.get(key, key.title()),
 )
 
 # Apply the provider choice before anything reads the capabilities, so the
@@ -1381,36 +1618,84 @@ if selected_provider == "ollama":
     else:
         st.sidebar.warning("Could not fetch available Ollama models. Please ensure Ollama server is running.")
 else:
-    # Ask Anthropic what it offers rather than trusting a list baked into this
-    # file. Falls back to the static registry when the call fails or no key is
-    # configured.
-    if "discovered_anthropic_models" not in st.session_state:
-        st.session_state.discovered_anthropic_models = api_handler.get_available_anthropic_models()
+    # Ask the provider what it offers rather than trusting a list baked into
+    # this file. Anthropic falls back to the static registry when the call
+    # fails or no key is configured; OpenRouter's listing is public, so it
+    # works before a key is set.
+    state_key = DISCOVERY_STATE_KEYS[selected_provider]
+    if state_key not in st.session_state:
+        st.session_state[state_key] = api_handler.discover_models()
 
-    discovered = st.session_state.discovered_anthropic_models
-    catalogue = discovered or ANTHROPIC_MODELS
+    discovered = st.session_state[state_key]
+    catalogue = discovered or (ANTHROPIC_MODELS if selected_provider == "anthropic" else {})
+
+    # MODEL_CONFIG is a module-level literal, rebuilt on every rerun, so it
+    # always reads back as the default. The live selection lives in the
+    # widget's own session state.
+    model_widget_key = f"model_select_{selected_provider}"
+    current = st.session_state.get(
+        model_widget_key, MODEL_CONFIG["providers"][selected_provider]["model"]
+    )
+
+    # OpenRouter lists several hundred models, so it needs narrowing before a
+    # dropdown is any use.
+    model_filter = ""
+    if selected_provider == "openrouter":
+        model_filter = st.sidebar.text_input(
+            "Filter models",
+            value="",
+            placeholder="e.g. claude, llama, free",
+            help="Matches the model id and name."
+        ).strip().lower()
+
     model_ids = sorted(catalogue.keys())
-    current = MODEL_CONFIG["providers"]["anthropic"]["model"]
+    if model_filter:
+        matched = [
+            m for m in model_ids
+            if model_filter in m.lower()
+            or model_filter in str(catalogue[m].get("display_name", "")).lower()
+        ]
+        if matched:
+            model_ids = matched
+        else:
+            st.sidebar.caption(f"No models match '{model_filter}' - showing all.")
+    if not model_ids:
+        model_ids = [current]
     if current not in model_ids:
-        model_ids.insert(0, current)
+        # The filter excluded the current selection, so fall to the first match
+        # rather than smuggling a non-matching entry into the list.
+        current = model_ids[0]
 
     def _label(model_id):
         entry = catalogue.get(model_id, {})
         label = entry.get("display_name") or model_id
-        return f"{label} (deprecated)" if entry.get("deprecated") else label
+        if entry.get("deprecated"):
+            label = f"{label} (deprecated)"
+        price = entry.get("prompt_price")
+        if price:
+            try:
+                # OpenRouter quotes USD per token; per-million reads better.
+                label = f"{label} - ${float(price) * 1_000_000:.2f}/M in"
+            except (TypeError, ValueError):
+                pass
+        return label
 
     selected_model = st.sidebar.selectbox(
-        "Select Anthropic Model",
+        f"Select {PROVIDER_DISPLAY_NAMES.get(selected_provider, selected_provider)} Model",
         options=model_ids,
         index=model_ids.index(current),
         format_func=_label,
+        key=model_widget_key,
     )
-    MODEL_CONFIG["providers"]["anthropic"]["model"] = selected_model
+    MODEL_CONFIG["providers"][selected_provider]["model"] = selected_model
 
     if not discovered:
-        st.sidebar.caption("Live model list unavailable - showing the built-in registry.")
+        if selected_provider == "anthropic":
+            st.sidebar.caption("Live model list unavailable - showing the built-in registry.")
+        else:
+            st.sidebar.caption("Could not reach the OpenRouter model list.")
     if st.sidebar.button("Refresh model list"):
-        st.session_state.discovered_anthropic_models = api_handler.get_available_anthropic_models()
+        st.session_state[state_key] = api_handler.discover_models()
         st.rerun()
 
 # Rebuild the handler so the capability read below reflects the chosen model.
@@ -1424,7 +1709,29 @@ st.sidebar.header("Response Depth")
 manual_temperature = None
 manual_effort = None
 
-if model_capabilities.get("sampling"):
+if model_capabilities.get("effort_levels"):
+    levels = model_capabilities["effort_levels"]
+    effort_mode = st.sidebar.radio(
+        "Effort Mode",
+        options=["Auto (Cognitive Mode)", "Manual"],
+        help="Auto sets effort from the cognitive mode (Survey: medium, Synthesis: high, Proposition: xhigh, clamped to what the model offers). Effort controls how much the model thinks before answering."
+    )
+    if effort_mode == "Manual":
+        default_effort = MODEL_CONFIG["providers"][selected_provider].get("effort", "high")
+        manual_effort = st.sidebar.select_slider(
+            "Effort",
+            options=levels,
+            value=default_effort if default_effort in levels else levels[-1],
+            help="Higher effort means deeper reasoning and more tokens spent."
+        )
+        st.sidebar.caption(f"Current: {manual_effort}")
+    else:
+        st.sidebar.caption("Effort will be set automatically based on query type")
+    if model_capabilities.get("sampling"):
+        st.sidebar.caption("This model also accepts temperature, but effort is the better depth control.")
+    else:
+        st.sidebar.caption("This model does not accept a temperature setting.")
+elif model_capabilities.get("sampling"):
     temperature_mode = st.sidebar.radio(
         "Temperature Mode",
         options=["Auto (Cognitive Mode)", "Manual"],
@@ -1442,25 +1749,6 @@ if model_capabilities.get("sampling"):
         st.sidebar.caption(f"Current: {manual_temperature:.2f}")
     else:
         st.sidebar.caption("Temperature will be set automatically based on query type")
-elif model_capabilities.get("effort_levels"):
-    levels = model_capabilities["effort_levels"]
-    effort_mode = st.sidebar.radio(
-        "Effort Mode",
-        options=["Auto (Cognitive Mode)", "Manual"],
-        help="Auto sets effort from the cognitive mode (Survey: medium, Synthesis: high, Proposition: xhigh). Effort controls how much the model thinks before answering."
-    )
-    if effort_mode == "Manual":
-        default_effort = MODEL_CONFIG["providers"]["anthropic"].get("effort", "high")
-        manual_effort = st.sidebar.select_slider(
-            "Effort",
-            options=levels,
-            value=default_effort if default_effort in levels else levels[-1],
-            help="Higher effort means deeper reasoning and more tokens spent."
-        )
-        st.sidebar.caption(f"Current: {manual_effort}")
-    else:
-        st.sidebar.caption("Effort will be set automatically based on query type")
-    st.sidebar.caption("This model does not accept a temperature setting.")
 else:
     st.sidebar.caption(
         "This model accepts no generation controls - depth is steered by the "
