@@ -400,19 +400,24 @@ def load_documents(directories=['documents', 'history', 'students']):
                 
                 file_start_time = time.time()
                 
+                # Tag the chunk with 'directory/item', not the bare basename:
+                # the categorisers downstream test for 'documents', 'history'
+                # and 'students/' in this string.
+                rel_path = f"{directory}/{item}"
+                
                 try:
                     if item.endswith('.pdf'):
                         with open(filepath, 'rb') as file:
                             pdf_reader = PdfReader(file)
                             for page in pdf_reader.pages:
-                                texts.append((page.extract_text(), item))
+                                texts.append((page.extract_text(), rel_path))
                     elif item.endswith(('.txt', '.md')):
                         with open(filepath, 'r', encoding='utf-8') as file:
-                            texts.append((file.read(), item))
+                            texts.append((file.read(), rel_path))
                     elif item.endswith(('.png', '.jpg', '.jpeg')):
                         image = Image.open(filepath)
                         text = pytesseract.image_to_string(image)
-                        texts.append((text, item))
+                        texts.append((text, rel_path))
                         
                     file_time = time.time() - file_start_time
                     logging.info(f"Loaded {item} in {file_time:.2f} seconds")
@@ -923,21 +928,23 @@ def get_ai_response(user_name, prompt, manual_temperature=None):
             answer = response_content.strip()
 
         # Clean up any remaining markdown or special characters
-        answer = answer.replace("\\n", "\n").replace("\\'", "')")
+        answer = answer.replace("\\n", "\n").replace("\\'", "'")
         
         # Log evaluation with explicit mode
         logger.info(f"Starting response evaluation for mode: {selected_mode}")
         evaluation_results = st.session_state.response_evaluator.evaluate_response(
             response=answer,  # Only evaluate the answer portion
             mode=selected_mode,  # Pass the explicit mode
-            temperature=mode_params['temperature']
+            temperature=effective_temperature,
+            temperature_source=temperature_source
         )
         logger.info(f"Evaluation results: {evaluation_results}")
         
         # Create chunk info with scores
         chunk_info = [
-            f"{filename} (score: {weighted_similarities[idx]:.4f})"
-            for idx, (_, filename) in enumerate(top_chunks)
+            f"{document_chunks_with_filenames[i][1]} "
+            f"(score: {weighted_similarities[i]:.4f})"
+            for i in top_indices
         ]
 
         # Return temperature info along with response
