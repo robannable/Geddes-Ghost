@@ -71,12 +71,37 @@ class FakeSessionState(dict):
 def load_model_layer():
     module = extract({
         'EFFORT_LEVELS_FULL', 'ANTHROPIC_MODELS', 'UNKNOWN_MODEL_CAPABILITIES',
+        'OPENROUTER_EFFORT_LEVELS', 'OPENROUTER_EFFORT_OVERRIDES',
+        'DISCOVERY_STATE_KEYS', 'clamp_effort',
         'MODEL_CONFIG', 'MODE_DEPTH', 'EFFORT_DEPTH', 'DEPTH_GUIDANCE',
         'get_model_capabilities', 'resolve_depth', 'format_depth_control',
         'format_usage', 'build_http_session', 'ModelResponse', 'ModelAPIHandler',
     })
+    session_state = FakeSessionState()
+    # OpenRouter capabilities come from its own listing, so the tests seed the
+    # discovery cache the way a live fetch would fill it.
+    session_state['discovered_openrouter_models'] = {
+        'anthropic/claude-sonnet-5': {
+            'display_name': 'Anthropic: Claude Sonnet 5',
+            'sampling': False, 'effort_levels': ['low', 'medium', 'high'],
+            'supported_parameters': ['max_tokens', 'reasoning'],
+            'prompt_price': '0.000002',
+        },
+        'meta-llama/llama-3.3-70b-instruct': {
+            'display_name': 'Meta: Llama 3.3 70B Instruct',
+            'sampling': True, 'effort_levels': [],
+            'supported_parameters': ['max_tokens', 'temperature', 'top_p'],
+            'prompt_price': '0.00000012',
+        },
+        'openai/gpt-5': {
+            'display_name': 'OpenAI: GPT-5',
+            'sampling': True, 'effort_levels': ['low', 'medium', 'high'],
+            'supported_parameters': ['max_tokens', 'temperature', 'reasoning'],
+            'prompt_price': '0.00000125',
+        },
+    }
     namespace = {
-        'st': types.SimpleNamespace(session_state=FakeSessionState()),
+        'st': types.SimpleNamespace(session_state=session_state),
         'os': os, 'json': json, 'requests': requests,
         'HTTPAdapter': HTTPAdapter, 'Retry': Retry,
         'RequestException': requests.exceptions.RequestException,
@@ -86,11 +111,13 @@ def load_model_layer():
     return namespace
 
 
-def config_for(ns, model):
+def config_for(ns, model, provider=None):
     config = json.loads(json.dumps(ns['MODEL_CONFIG']))
     config['timeout'] = tuple(config['timeout'])
-    config['current_provider'] = 'ollama' if ':' in model else 'anthropic'
-    config['providers'][config['current_provider']]['model'] = model
+    if provider is None:
+        provider = 'ollama' if ':' in model else 'anthropic'
+    config['current_provider'] = provider
+    config['providers'][provider]['model'] = model
     return config
 
 
@@ -108,8 +135,8 @@ def test_capabilities(ns):
 def test_payloads(ns):
     print("\nRequest payloads")
 
-    def payload(model, **kwargs):
-        handler = ns['ModelAPIHandler'](config_for(ns, model))
+    def payload(model, provider=None, **kwargs):
+        handler = ns['ModelAPIHandler'](config_for(ns, model, provider))
         return handler.build_payload("question", system_prompt="persona", **kwargs)
 
     p = payload('claude-sonnet-5', temperature=0.9, effort='xhigh')
@@ -132,6 +159,93 @@ def test_payloads(ns):
     p = payload('cogito:latest', temperature=0.8)
     check("ollama keeps temperature", p['options']['temperature'], 0.8)
     check("ollama keeps top_p", p['options']['top_p'], 0.9)
+
+
+def test_openrouter(ns):
+    print("\nOpenRouter")
+    caps = ns['get_model_capabilities']
+
+    check("reasoning-only model rejects sampling",
+          caps('openrouter', 'anthropic/claude-sonnet-5')['sampling'], False)
+    check("reasoning-only model offers effort",
+          caps('openrouter', 'anthropic/claude-sonnet-5')['effort_levels'], ['low', 'medium', 'high'])
+    check("sampling-only model offers no effort",
+          caps('openrouter', 'meta-llama/llama-3.3-70b-instruct')['effort_levels'], [])
+    check("unlisted model sends nothing",
+          caps('openrouter', 'some/unlisted-model'),
+          {'display_name': 'some/unlisted-model', 'sampling': False, 'effort_levels': []})
+
+    def payload(model, **kwargs):
+        handler = ns['ModelAPIHandler'](config_for(ns, model, 'openrouter'))
+        return handler.build_payload("question", system_prompt="persona", **kwargs)
+
+    p = payload('anthropic/claude-sonnet-5', effort='high')
+    check("openrouter uses chat-completions message shape",
+          [m['role'] for m in p['messages']], ['system', 'user'])
+    check("system prompt becomes a system message", p['messages'][0]['content'], 'persona')
+    check("reasoning effort sent", p.get('reasoning'), {'effort': 'high'})
+    check("no temperature on a reasoning-only model", 'temperature' in p, False)
+
+    p = payload('meta-llama/llama-3.3-70b-instruct', temperature=0.85)
+    check("sampling model gets temperature", p.get('temperature'), 0.85)
+    check("sampling model gets no reasoning", 'reasoning' in p, False)
+
+    # A model offering both: effort drives depth, temperature is not smuggled
+    # in from config behind it.
+    p = payload('openai/gpt-5', effort='high')
+    check("both-capable model sends reasoning", p.get('reasoning'), {'effort': 'high'})
+    check("both-capable model omits default temperature", 'temperature' in p, False)
+    p = payload('openai/gpt-5', temperature=0.2, effort='high')
+    check("explicit temperature still honoured", p.get('temperature'), 0.2)
+
+    p = payload('some/unlisted-model', temperature=0.9, effort='high')
+    check("unlisted model sends no controls", ('temperature' in p, 'reasoning' in p), (False, False))
+
+    # Response parsing (OpenAI-shaped)
+    handler = ns['ModelAPIHandler'](config_for(ns, 'anthropic/claude-sonnet-5', 'openrouter'))
+    result = handler._parse_openrouter_response({
+        'model': 'anthropic/claude-sonnet-5',
+        'choices': [{'message': {'role': 'assistant', 'content': ' By leaves we live. '},
+                     'finish_reason': 'stop'}],
+        'usage': {'prompt_tokens': 800, 'completion_tokens': 210},
+    })
+    check("openrouter text extracted", result.text, 'By leaves we live.')
+    check("openrouter usage normalised",
+          (result.usage['input_tokens'], result.usage['output_tokens']), (800, 210))
+
+    truncated = handler._parse_openrouter_response({
+        'choices': [{'message': {'content': 'cut off'}, 'finish_reason': 'length'}],
+        'usage': {},
+    })
+    check("length maps to max_tokens", truncated.stop_reason, 'max_tokens')
+
+    try:
+        handler._parse_openrouter_response({'error': {'message': 'upstream is down'}})
+        check("error in a 200 body raises", False, True)
+    except ValueError as exc:
+        check("error in a 200 body raises", 'upstream is down' in str(exc), True)
+
+    try:
+        handler._parse_openrouter_response({
+            'choices': [{'message': {'content': ''}, 'finish_reason': 'content_filter'}]})
+        check("content filter raises", False, True)
+    except ValueError as exc:
+        check("content filter raises", 'declined' in str(exc), True)
+
+
+def test_effort_clamping(ns):
+    print("\nEffort clamping")
+    clamp = ns['clamp_effort']
+    full = ns['EFFORT_LEVELS_FULL']
+    short = ['low', 'medium', 'high']
+    check("exact level kept", clamp('high', full), 'high')
+    check("xhigh clamps down to high", clamp('xhigh', short), 'high')
+    check("max clamps down to high", clamp('max', short), 'high')
+    check("modes keep their ordering", [clamp(e, short) for e in ('medium', 'high', 'xhigh')],
+          ['medium', 'high', 'high'])
+    check("low survives a top-heavy ladder", clamp('low', ['high', 'max']), 'high')
+    check("no ladder means no effort", clamp('high', []), None)
+    check("unrecognised value dropped", clamp('nonsense', full), None)
 
 
 def test_depth(ns):
@@ -273,6 +387,8 @@ def main():
     ns = load_model_layer()
     test_capabilities(ns)
     test_payloads(ns)
+    test_openrouter(ns)
+    test_effort_clamping(ns)
     test_depth(ns)
     test_response_parsing(ns)
     test_transport(ns)

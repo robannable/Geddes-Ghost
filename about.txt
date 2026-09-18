@@ -3,6 +3,7 @@
 This project uses a Large Language Model (LLM) to simulate a conversation with a renowned historical figure. Responses are a combination of information present in the model's dataset plus chosen documents related to their work and associated texts, using Retrieval Augmented Generation (RAG) to fine tune the knowledge base.
 
 
-Available Models:
+Available Providers:
 - Anthropic Claude: A powerful language model for detailed, contextual responses
+- OpenRouter: One key, many models - Claude, GPT, Llama, Mistral and others
 - Ollama: A local model option for privacy-focused interactions
