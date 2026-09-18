@@ -22,7 +22,7 @@ When you use the chat interface, the program:
 - Formats the response to be clear and readable
 - Keeps track of your conversation history
 
-The program can use different AI models (currently Anthropic and Ollama) to generate responses. This flexibility allows for different styles of interaction and helps ensure the system keeps working even if one service has issues.
+The program can use different AI models (currently Anthropic and Ollama) to generate responses. This flexibility allows for different styles of interaction and helps ensure the system keeps working even if one service has issues. Each model declares which generation settings it accepts, so the controls shown in the sidebar match what the chosen model can actually do.
 
 ### Understanding the Responses
 
@@ -79,10 +79,39 @@ We track lightweight linguistic markers that often correlate with creative/insig
 
 For each response, a small dictionary is logged in `creative_markers` counting occurrences per marker. The dashboard plots aggregate frequencies.
 
-### 5) Temperature, Model Provider, and Model Name
-- The generation temperature and chosen model are logged to help understand style and length patterns:
-  - `temperature`: recorded per response; some charts summarize response length by temperature.
-  - `model_provider` and `model_name`: e.g., Anthropic / Claude variant, or Ollama / local model. The dashboard shows usage distribution across models.
+### 5) Response Depth, Model Provider, and Model Name
+Temperature used to be the only depth control. Anthropic removed the sampling
+parameters (`temperature`, `top_p`, `top_k`) from Opus 4.7 onwards - sending any
+of them to a current model returns a 400 - and replaced them with
+`output_config.effort`. Ollama and older Claude models still take temperature.
+
+The system therefore records a provider-neutral **depth band** alongside
+whichever control was actually sent:
+
+- `depth`: `focused`, `balanced` or `expansive`. Always present.
+- `actual_temperature`: the temperature sent, where the model accepts one.
+- `effort`: the effort level sent, where the model accepts one.
+- `temperature_source`: whether the control came from the cognitive mode (auto)
+  or the sidebar (manual).
+- `model_provider` and `model_name`: e.g. Anthropic / Claude variant, or Ollama
+  / local model. The dashboard shows usage distribution across models.
+
+Cognitive modes map onto depth as follows:
+
+| Mode | Depth | Temperature | Effort |
+|---|---|---|---|
+| Survey | focused | 0.7 | `medium` |
+| Synthesis | balanced | 0.8 | `high` |
+| Proposition | expansive | 0.9 | `xhigh` |
+
+On a model that accepts no generation controls, the depth band still shapes the
+system prompt, so the pedagogy survives the loss of the parameter.
+
+### 5a) Token Usage
+Each response records what it cost: `input_tokens`, `output_tokens` and
+`cache_read_input_tokens` where the provider reports them, plus `stop_reason`
+so truncated and declined responses are visible in the logs rather than
+appearing as unusually short answers.
 
 ### 6) Logged Fields (CSV)
 Typical CSV columns written to `logs/` include:
@@ -94,7 +123,10 @@ Typical CSV columns written to `logs/` include:
 - `chunk1_score`, `chunk2_score`, `chunk3_score`: Retrieved context chunks with similarity scores
 - `cognitive_mode`: JSON-like dict of mode counts
 - `creative_markers`: JSON-like dict of marker counts
-- `temperature`, `model_provider`, `model_name`: Generation settings
+- `temperature`: JSON-like dict of effectiveness keyed by the control in play
+- `actual_temperature`, `effort`, `depth`, `temperature_source`: Generation settings
+- `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `stop_reason`: Usage
+- `model_provider`, `model_name`: Which model produced the response
 
 Note: Older logs may not include all columns; the dashboard fills missing columns with empty values where possible to keep analytics robust.
 
@@ -120,7 +152,7 @@ The program is built using:
 
 We're working on several improvements:
 1. Making the responses more accurate and authentic
-2. Adding support for more AI models
+2. Streaming responses as they are generated, rather than waiting for the whole reply
 3. Improving how the program finds relevant information
 4. Making the interface more user-friendly
 5. Adding features like conversation export and different language support

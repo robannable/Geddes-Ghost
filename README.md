@@ -58,7 +58,45 @@ An interactive AI chatbot that simulates conversations with Patrick Geddes (1854
 
 ## Model Configuration
 
-Model provider and parameters are configured in `geddesghost.py` (see `MODEL_CONFIG`). You can switch between Anthropic and Ollama by changing the `current_provider` field.
+Model provider and parameters are configured in `geddesghost.py` (see `MODEL_CONFIG`). You can switch between Anthropic and Ollama by changing the `current_provider` field, or from the sidebar at runtime.
+
+### Generation controls
+
+Anthropic removed the sampling parameters (`temperature`, `top_p`, `top_k`) from Opus 4.7 onwards. Sending any of them to a current model returns a 400. Reasoning depth is now set with `output_config.effort` instead.
+
+Rather than hard-code one knob, each model declares what it accepts in `ANTHROPIC_MODELS`, and both the request payload and the sidebar are built from that declaration:
+
+| Model | Control |
+|---|---|
+| `claude-opus-5`, `claude-sonnet-5`, `claude-opus-4-8` | `effort` (low / medium / high / xhigh / max) |
+| `claude-sonnet-4-6` | `temperature` |
+| `claude-haiku-4-5` | `temperature` |
+| `claude-sonnet-4-20250514` (deprecated) | `temperature` |
+| Ollama models | `temperature` and `top_p` |
+
+Models the registry does not recognise default to sending **no** generation parameters. Omitting a parameter is always valid; sending one the model rejects is not.
+
+The Anthropic model list is fetched live from `GET /v1/models` when an API key is present, falling back to the built-in registry otherwise. Use the sidebar's **Refresh model list** button after a new model is released.
+
+### Response depth
+
+The cognitive modes map onto a provider-neutral depth band, and whichever control the selected model supports is derived from it:
+
+| Cognitive mode | Depth | Temperature | Effort |
+|---|---|---|---|
+| Survey | focused | 0.7 | `medium` |
+| Synthesis | balanced | 0.8 | `high` |
+| Proposition | expansive | 0.9 | `xhigh` |
+
+On a model that accepts no generation controls at all, the depth band still steers the system prompt.
+
+## Tests
+
+The model layer has no external dependencies at test time - it is exercised against stubs rather than the live API:
+
+```bash
+python test_model_layer.py
+```
 
 ## Documentation
 

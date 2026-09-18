@@ -5,9 +5,11 @@ A Retrieval-Augmented Generation (RAG) application that simulates interactions
 with Patrick Geddes, the Scottish polymath. The system currently includes:
 
 - TF-IDF-based retrieval over `documents/`, `history/`, and `students/`
-- Dynamic cognitive modes with temperature variation (0.7–0.9)
+- Dynamic cognitive modes mapped to a response depth band
+- Capability-driven model selection: whichever generation control the chosen
+  model accepts (temperature, or output_config.effort) is the one that is sent
 - Context-aware response generation via Anthropic Claude (default) or Ollama
-- Comprehensive logging and an Admin Dashboard for analytics
+- Comprehensive logging, including token usage, and an Admin Dashboard
 
 Admin Dashboard views:
 1. Performance, Document Usage, User Analysis, Response Metrics
@@ -51,7 +53,6 @@ import numpy as np
 import html
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
-import requests
 from requests.exceptions import RequestException
 import dotenv
 
@@ -155,7 +156,8 @@ class GeddesCognitiveModes:
                     'where', 'when', 'who', 'which', 'look', 'find', 'discover'
                 ],
                 'prompt_prefix': 'Let us first survey and observe...',
-                'temperature': 0.7
+                'temperature': 0.7,
+                'effort': 'medium'
             },
             'synthesis': {
                 'keywords': [
@@ -166,7 +168,8 @@ class GeddesCognitiveModes:
                     'interconnect', 'associate', 'correlate'
                 ],
                 'prompt_prefix': 'Now, let us weave together these disparate threads...',
-                'temperature': 0.8
+                'temperature': 0.8,
+                'effort': 'high'
             },
             'proposition': {
                 'keywords': [
@@ -177,7 +180,8 @@ class GeddesCognitiveModes:
                     'hypothesis', 'theory', 'concept'
                 ],
                 'prompt_prefix': 'Let us venture forth with a proposition...',
-                'temperature': 0.9
+                'temperature': 0.9,
+                'effort': 'xhigh'
             }
         }
         logger.info("Initializing new GeddesCognitiveModes")
@@ -216,8 +220,153 @@ class GeddesCognitiveModes:
         return {
             'mode': selected_mode,
             'prompt_prefix': self.modes[selected_mode]['prompt_prefix'],
-            'temperature': self.modes[selected_mode]['temperature']
+            'temperature': self.modes[selected_mode]['temperature'],
+            'effort': self.modes[selected_mode]['effort']
         }
+
+# ---------------------------------------------------------------------------
+# Response depth
+# ---------------------------------------------------------------------------
+# Survey / synthesis / proposition is a claim about how much thinking an answer
+# deserves, not about randomness. Temperature was only ever a proxy for that,
+# and current Anthropic models no longer accept it. "Depth" is the provider
+# neutral middle term: whichever control the selected model supports is mapped
+# onto it, and the prompt guidance keys off the depth band. On a model that
+# accepts no generation controls at all, the prompt is still the steer.
+
+MODE_DEPTH = {
+    'survey': 'focused',
+    'synthesis': 'balanced',
+    'proposition': 'expansive',
+}
+
+EFFORT_DEPTH = {
+    'low': 'focused',
+    'medium': 'focused',
+    'high': 'balanced',
+    'xhigh': 'expansive',
+    'max': 'expansive',
+}
+
+DEPTH_GUIDANCE = {
+    'focused': "\n\nIn this moment, focus on diagnostic precision and careful observation. Be economical with words and deliberate in your analysis.",
+    'balanced': "\n\nRespond with your natural voice, balancing observation with interpretation as the question warrants.",
+    'expansive': "\n\nIn this moment, allow yourself to venture into bold speculation and unexpected connections. Let the response breathe and expand where the ideas demand it. Embrace creative risk.",
+}
+
+
+def resolve_depth(mode, temperature=None, effort=None):
+    """Map whichever generation control is in play onto a depth band."""
+    if temperature is not None:
+        if temperature >= 0.85:
+            return 'expansive'
+        if temperature <= 0.5:
+            return 'focused'
+        return 'balanced'
+    if effort is not None:
+        return EFFORT_DEPTH.get(effort, 'balanced')
+    return MODE_DEPTH.get(mode, 'balanced')
+
+
+def format_depth_control(generation_info):
+    """Human-readable summary of the control that shaped this response."""
+    depth = generation_info.get('depth', 'balanced')
+    if generation_info.get('temperature') is not None:
+        return f"{depth} (temperature {generation_info['temperature']})"
+    if generation_info.get('effort') is not None:
+        return f"{depth} (effort {generation_info['effort']})"
+    return f"{depth} (prompt only)"
+
+
+def format_usage(usage):
+    """Human-readable token usage, or a note when the provider reports none."""
+    if not usage:
+        return "not reported"
+    parts = []
+    if usage.get('input_tokens') is not None:
+        parts.append(f"{usage['input_tokens']} in")
+    if usage.get('output_tokens') is not None:
+        parts.append(f"{usage['output_tokens']} out")
+    if usage.get('cache_read_input_tokens'):
+        parts.append(f"{usage['cache_read_input_tokens']} cached")
+    return ' / '.join(parts) if parts else "not reported"
+
+
+# ---------------------------------------------------------------------------
+# Model registry and capabilities
+# ---------------------------------------------------------------------------
+# Anthropic removed the sampling parameters (temperature / top_p / top_k) from
+# Opus 4.7 onwards: sending any of them to a current model returns a 400.
+# Reasoning depth is now steered with `output_config.effort` instead. Rather
+# than hard-code one knob, each model declares what it accepts and both the
+# request payload and the sidebar are built from that declaration.
+#
+# Unknown models default to "no sampling parameters, no effort". Omitting a
+# parameter is always valid; sending one the model rejects is not.
+
+EFFORT_LEVELS_FULL = ["low", "medium", "high", "xhigh", "max"]
+
+ANTHROPIC_MODELS = {
+    "claude-opus-5": {
+        "display_name": "Claude Opus 5",
+        "sampling": False,
+        "effort_levels": EFFORT_LEVELS_FULL,
+    },
+    "claude-sonnet-5": {
+        "display_name": "Claude Sonnet 5",
+        "sampling": False,
+        "effort_levels": EFFORT_LEVELS_FULL,
+    },
+    "claude-opus-4-8": {
+        "display_name": "Claude Opus 4.8",
+        "sampling": False,
+        "effort_levels": EFFORT_LEVELS_FULL,
+    },
+    "claude-sonnet-4-6": {
+        "display_name": "Claude Sonnet 4.6",
+        "sampling": True,
+        "effort_levels": ["low", "medium", "high", "max"],
+    },
+    "claude-haiku-4-5": {
+        "display_name": "Claude Haiku 4.5",
+        "sampling": True,
+        "effort_levels": [],
+    },
+    "claude-sonnet-4-20250514": {
+        "display_name": "Claude Sonnet 4 (deprecated)",
+        "sampling": True,
+        "effort_levels": [],
+        "deprecated": True,
+    },
+}
+
+UNKNOWN_MODEL_CAPABILITIES = {
+    "display_name": None,
+    "sampling": False,
+    "effort_levels": [],
+}
+
+
+def get_model_capabilities(provider, model):
+    """Return the capability declaration for a provider/model pair.
+
+    Falls back to the conservative default for models we do not recognise, so
+    a newly released model never causes a 400 from a parameter it rejects.
+    """
+    if provider == "ollama":
+        # Ollama passes sampling options straight through to the local runtime.
+        return {"display_name": model, "sampling": True, "effort_levels": []}
+
+    discovered = st.session_state.get("discovered_anthropic_models", {})
+    if model in discovered:
+        return discovered[model]
+    if model in ANTHROPIC_MODELS:
+        return ANTHROPIC_MODELS[model]
+
+    caps = dict(UNKNOWN_MODEL_CAPABILITIES)
+    caps["display_name"] = model
+    return caps
+
 
 # Load model config from file or notepad (for now, hardcode as a dict)
 MODEL_CONFIG = {
@@ -225,13 +374,15 @@ MODEL_CONFIG = {
     "providers": {
         "anthropic": {
             "provider": "anthropic",
-            "model": "claude-sonnet-4-20250514",
+            "model": "claude-sonnet-5",
             "max_tokens": 4000,
+            # Only used by models that still accept sampling parameters.
             "temperature": 0.7,
-            "top_p": 0.9,
-            "presence_penalty": 0.1,
+            # Used by models that accept output_config.effort.
+            "effort": "high",
             "message_retention": "no_retention",
             "api_endpoint": "https://api.anthropic.com/v1/messages",
+            "models_endpoint": "https://api.anthropic.com/v1/models",
             "api_key_env": "ANTHROPIC_API_KEY",
             "headers": {
                 "Content-Type": "application/json",
@@ -245,12 +396,48 @@ MODEL_CONFIG = {
             "temperature": 0.7,
             "top_p": 0.9,
             "api_endpoint": "http://localhost:11434/api/generate",
+            "models_endpoint": "http://localhost:11434/api/tags",
             "headers": {
                 "Content-Type": "application/json"
             }
         }
-    }
+    },
+    # (connect, read) seconds. Without this a stalled connection hangs Streamlit
+    # indefinitely.
+    "timeout": (10, 120),
 }
+
+
+class ModelResponse:
+    """Normalised result of a generation request, whatever the provider."""
+
+    def __init__(self, text, usage=None, stop_reason=None, model=None, raw=None):
+        self.text = text
+        self.usage = usage or {}
+        self.stop_reason = stop_reason
+        self.model = model
+        self.raw = raw or {}
+
+
+def build_http_session():
+    """A requests session that retries transient failures with backoff.
+
+    POST is not retried by default, so it has to be named explicitly. 429 and
+    529 are Anthropic's rate-limit and overloaded responses.
+    """
+    retry = Retry(
+        total=4,
+        backoff_factor=1.0,
+        status_forcelist=[429, 500, 502, 503, 504, 529],
+        allowed_methods=["GET", "POST"],
+        respect_retry_after_header=True,
+    )
+    session = requests.Session()
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
 
 class ModelAPIHandler:
     def __init__(self, config):
@@ -260,16 +447,25 @@ class ModelAPIHandler:
         self.api_key_env = self.provider_config.get("api_key_env")
         self.api_key = os.getenv(self.api_key_env) if self.api_key_env else None
         self.api_endpoint = self.provider_config["api_endpoint"]
+        self.timeout = config.get("timeout", (10, 120))
         self.headers = self.provider_config["headers"].copy()
         if self.api_key:
             # Add API key to headers if needed
             if self.provider == "anthropic":
                 self.headers["x-api-key"] = self.api_key
+        self.session = build_http_session()
+
+    @property
+    def capabilities(self):
+        return get_model_capabilities(self.provider, self.provider_config["model"])
 
     def get_available_ollama_models(self):
         """Fetch available models from Ollama server"""
         try:
-            response = requests.get("http://localhost:11434/api/tags")
+            response = self.session.get(
+                self.provider_config.get("models_endpoint", "http://localhost:11434/api/tags"),
+                timeout=self.timeout,
+            )
             if response.status_code == 200:
                 models = response.json().get("models", [])
                 return [model["name"] for model in models]
@@ -278,62 +474,197 @@ class ModelAPIHandler:
             logger.error(f"Error fetching Ollama models: {str(e)}")
             return []
 
-    def make_request(self, prompt, system_prompt=None, temperature=None):
-        # Use provided temperature or fall back to config default
-        effective_temperature = temperature if temperature is not None else self.provider_config["temperature"]
+    def get_available_anthropic_models(self):
+        """Fetch the live model list from Anthropic and derive capabilities.
+
+        GET /v1/models costs nothing and reports each model's id, display name
+        and capability tree, so the sidebar no longer depends on a list baked
+        into this file. Effort support is read from the capability tree;
+        sampling support is not reported by the API, so it comes from the
+        static registry and defaults to False for anything unrecognised.
+        """
+        endpoint = self.provider_config.get("models_endpoint")
+        if not endpoint or not self.api_key:
+            return {}
+        try:
+            response = self.session.get(endpoint, headers=self.headers, timeout=self.timeout)
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as e:
+            logger.error(f"Error fetching Anthropic models: {str(e)}")
+            return {}
+
+        discovered = {}
+        for entry in payload.get("data", []):
+            model_id = entry.get("id")
+            if not model_id:
+                continue
+            known = ANTHROPIC_MODELS.get(model_id, {})
+            effort_caps = (entry.get("capabilities") or {}).get("effort") or {}
+            effort_levels = [
+                level for level in EFFORT_LEVELS_FULL
+                if (effort_caps.get(level) or {}).get("supported")
+            ]
+            if not effort_levels:
+                effort_levels = known.get("effort_levels", [])
+            discovered[model_id] = {
+                "display_name": entry.get("display_name") or known.get("display_name") or model_id,
+                "sampling": known.get("sampling", False),
+                "effort_levels": effort_levels,
+                "max_tokens": entry.get("max_tokens"),
+                "max_input_tokens": entry.get("max_input_tokens"),
+                "deprecated": known.get("deprecated", False),
+            }
+        return discovered
+
+    def build_payload(self, prompt, system_prompt=None, temperature=None, effort=None):
+        """Assemble a provider-specific request body from the model's capabilities."""
+        caps = self.capabilities
 
         if self.provider == "anthropic":
             payload = {
                 "model": self.provider_config["model"],
                 "max_tokens": self.provider_config["max_tokens"],
-                "temperature": effective_temperature,
-                "top_p": self.provider_config["top_p"],
                 "messages": [
                     {"role": "user", "content": prompt}
                 ]
             }
             if system_prompt:
                 payload["system"] = system_prompt
-        elif self.provider == "ollama":
-            payload = {
+            # Send temperature only where it is still accepted, and never
+            # alongside top_p: passing both errors on every Claude 4+ model.
+            if caps.get("sampling"):
+                effective_temperature = (
+                    temperature if temperature is not None
+                    else self.provider_config.get("temperature")
+                )
+                if effective_temperature is not None:
+                    payload["temperature"] = effective_temperature
+            # Effort replaces temperature as the depth control on current models.
+            if caps.get("effort_levels"):
+                effective_effort = effort or self.provider_config.get("effort")
+                if effective_effort in caps["effort_levels"]:
+                    payload["output_config"] = {"effort": effective_effort}
+            return payload
+
+        if self.provider == "ollama":
+            effective_temperature = (
+                temperature if temperature is not None
+                else self.provider_config.get("temperature", 0.7)
+            )
+            return {
                 "model": self.provider_config["model"],
                 "prompt": f"{system_prompt}\n\n{prompt}" if system_prompt else prompt,
                 "stream": False,
                 "options": {
                     "temperature": effective_temperature,
-                    "top_p": self.provider_config["top_p"],
+                    "top_p": self.provider_config.get("top_p", 0.9),
                     "num_predict": self.provider_config["max_tokens"]
                 }
             }
-        else:
-            raise ValueError(f"Unsupported provider: {self.provider}")
 
-        response = requests.post(self.api_endpoint, headers=self.headers, json=payload)
-        response.raise_for_status()
-        
-        # Handle Ollama's response format
-        if self.provider == "ollama":
-            try:
-                response_data = response.json()
-                if isinstance(response_data, dict) and "response" in response_data:
-                    return {"content": response_data["response"]}
-                else:
-                    raise ValueError(f"Unexpected Ollama response format: {response_data}")
-            except json.JSONDecodeError as e:
-                logger.error(f"Error decoding Ollama response: {str(e)}")
-                raise ValueError(f"Error decoding Ollama response: {str(e)}")
-        
-        return response.json()
+        raise ValueError(f"Unsupported provider: {self.provider}")
+
+    def make_request(self, prompt, system_prompt=None, temperature=None, effort=None):
+        """Send a generation request and return a normalised ModelResponse."""
+        payload = self.build_payload(
+            prompt, system_prompt=system_prompt, temperature=temperature, effort=effort
+        )
+
+        try:
+            response = self.session.post(
+                self.api_endpoint, headers=self.headers, json=payload, timeout=self.timeout
+            )
+        except RequestException as e:
+            logger.error(f"Request to {self.provider} failed: {str(e)}")
+            raise ValueError(f"Could not reach the {self.provider} API: {str(e)}")
+
+        if response.status_code >= 400:
+            # The API reports what it disliked in the body; a bare status code
+            # is not enough to debug a rejected parameter.
+            detail = response.text[:500]
+            logger.error(f"{self.provider} API returned {response.status_code}: {detail}")
+            raise ValueError(f"{self.provider} API error {response.status_code}: {detail}")
+
+        try:
+            data = response.json()
+        except json.JSONDecodeError as e:
+            logger.error(f"Error decoding {self.provider} response: {str(e)}")
+            raise ValueError(f"Error decoding {self.provider} response: {str(e)}")
+
+        if self.provider == "anthropic":
+            return self._parse_anthropic_response(data)
+        return self._parse_ollama_response(data)
+
+    def _parse_anthropic_response(self, data):
+        stop_reason = data.get("stop_reason")
+
+        # A refusal arrives as HTTP 200 with no usable content, so it has to be
+        # checked before reading the content blocks.
+        if stop_reason == "refusal":
+            details = data.get("stop_details") or {}
+            category = details.get("category") or "unspecified"
+            raise ValueError(
+                f"The model declined to answer this request (category: {category})."
+            )
+
+        blocks = data.get("content")
+        if not isinstance(blocks, list):
+            logger.error(f"Unexpected Anthropic response format: {data}")
+            raise ValueError(f"Unexpected Anthropic API response format: {data}")
+
+        # Text blocks only: thinking blocks carry no `text` key and are skipped.
+        text = " ".join(
+            block.get("text", "") for block in blocks
+            if isinstance(block, dict) and block.get("type") == "text"
+        ).strip()
+
+        if stop_reason == "max_tokens":
+            logger.warning("Response truncated: hit max_tokens")
+
+        usage = data.get("usage") or {}
+        return ModelResponse(
+            text=text,
+            usage={
+                "input_tokens": usage.get("input_tokens"),
+                "output_tokens": usage.get("output_tokens"),
+                "cache_read_input_tokens": usage.get("cache_read_input_tokens"),
+            },
+            stop_reason=stop_reason,
+            model=data.get("model"),
+            raw=data,
+        )
+
+    def _parse_ollama_response(self, data):
+        if not isinstance(data, dict) or "response" not in data:
+            logger.error(f"Unexpected Ollama response format: {data}")
+            raise ValueError(f"Unexpected Ollama response format: {data}")
+
+        return ModelResponse(
+            text=data["response"].strip(),
+            usage={
+                "input_tokens": data.get("prompt_eval_count"),
+                "output_tokens": data.get("eval_count"),
+                "cache_read_input_tokens": None,
+            },
+            stop_reason=data.get("done_reason"),
+            model=data.get("model"),
+            raw=data,
+        )
 
 dotenv.load_dotenv()
 
 def check_api_connection():
-    """Check if we can connect to the Anthropic API"""
+    """Check we can reach the provider without spending tokens on it."""
     try:
         api_handler = ModelAPIHandler(MODEL_CONFIG)
-        # Do a minimal API call
-        response = api_handler.make_request("test")
-        return True
+        endpoint = api_handler.provider_config.get("models_endpoint")
+        if not endpoint:
+            return False
+        response = api_handler.session.get(
+            endpoint, headers=api_handler.headers, timeout=api_handler.timeout
+        )
+        return response.status_code == 200
     except Exception as e:
         logger.error(f"API connection error: {str(e)}")
         return False
@@ -524,7 +855,9 @@ def initialize_log_files():
                 'unique_files', 'chunk1_score', 'chunk2_score', 'chunk3_score',
                 'cognitive_mode', 'response_length', 'creative_markers', 'temperature',
                 'actual_temperature', 'temperature_source', 'detected_mode',
-                'model_provider', 'model_name'
+                'model_provider', 'model_name',
+                'effort', 'depth', 'input_tokens', 'output_tokens',
+                'cache_read_input_tokens', 'stop_reason'
             ], quoting=csv.QUOTE_ALL)
             writer.writeheader()
     
@@ -549,21 +882,29 @@ def write_markdown_history(user_name, question, response, csv_file):
         f.write(f"**Model Used:** {current_provider} - {current_model}\n\n")
         f.write("---\n\n")
 
-def update_chat_logs(user_name, question, response, unique_files, chunk_info, csv_file, json_file, temperature_info=None):
+def update_chat_logs(user_name, question, response, unique_files, chunk_info, csv_file, json_file, generation_info=None):
     """Update both CSV and JSON logs with chat data"""
     current_date = datetime.now().strftime("%Y-%m-%d")
     current_time = datetime.now().strftime("%H:%M:%S")
 
-    # Use temperature_info if provided, otherwise fall back to cognitive mode detection
-    if temperature_info:
-        current_mode = temperature_info['mode']
-        temperature = temperature_info['temperature']
-        temperature_source = temperature_info['source']
+    # Use generation_info if provided, otherwise fall back to cognitive mode detection
+    if generation_info:
+        current_mode = generation_info['mode']
+        temperature = generation_info.get('temperature')
+        effort = generation_info.get('effort')
+        depth = generation_info.get('depth', 'balanced')
+        temperature_source = generation_info['source']
+        usage = generation_info.get('usage') or {}
+        stop_reason = generation_info.get('stop_reason')
     else:
         mode_params = st.session_state.cognitive_modes.get_mode_parameters(question)
         current_mode = mode_params['mode']
         temperature = mode_params['temperature']
+        effort = mode_params['effort']
+        depth = resolve_depth(current_mode, temperature=temperature)
         temperature_source = "auto (legacy)"
+        usage = {}
+        stop_reason = None
 
     current_provider = MODEL_CONFIG["current_provider"]
     current_model = MODEL_CONFIG["providers"][current_provider]["model"]
@@ -573,7 +914,8 @@ def update_chat_logs(user_name, question, response, unique_files, chunk_info, cs
         response=response,
         mode=current_mode,
         temperature=temperature,
-        temperature_source=temperature_source
+        temperature_source=temperature_source,
+        effort=effort
     )
     
     # Prepare CSV row with full metrics
@@ -595,7 +937,13 @@ def update_chat_logs(user_name, question, response, unique_files, chunk_info, cs
         'temperature_source': temperature_source,  # auto/manual
         'detected_mode': current_mode,  # The cognitive mode detected/used
         'model_provider': current_provider,
-        'model_name': current_model
+        'model_name': current_model,
+        'effort': effort,
+        'depth': depth,
+        'input_tokens': usage.get('input_tokens'),
+        'output_tokens': usage.get('output_tokens'),
+        'cache_read_input_tokens': usage.get('cache_read_input_tokens'),
+        'stop_reason': stop_reason
     }
     
     # Write to CSV with proper quoting to handle multi-line responses
@@ -621,6 +969,10 @@ def update_chat_logs(user_name, question, response, unique_files, chunk_info, cs
         'evaluation': evaluation_results,
         'actual_temperature': temperature,
         'temperature_source': temperature_source,
+        'effort': effort,
+        'depth': depth,
+        'usage': usage,
+        'stop_reason': stop_reason,
         'model_provider': current_provider,
         'model_name': current_model
     }
@@ -782,7 +1134,7 @@ def assemble_enhanced_context(
     
     return rag_context
 
-def get_ai_response(user_name, prompt, manual_temperature=None):
+def get_ai_response(user_name, prompt, manual_temperature=None, manual_effort=None):
     try:
         # Log the model being used
         current_provider = MODEL_CONFIG["current_provider"]
@@ -811,15 +1163,45 @@ def get_ai_response(user_name, prompt, manual_temperature=None):
         mode_params = st.session_state.cognitive_modes.get_mode_parameters(prompt)
         selected_mode = mode_params.get('mode', 'survey')  # Default to survey if mode is missing
 
-        # Determine which temperature to use
-        if manual_temperature is not None:
-            effective_temperature = manual_temperature
-            temperature_source = "manual"
-            logger.info(f"Using manual temperature: {effective_temperature}")
+        # Resolve the generation controls this model actually accepts. Sending
+        # temperature to a model that rejects it returns a 400, so capability
+        # comes first and the requested value second.
+        capabilities = api_handler.capabilities
+        supports_sampling = bool(capabilities.get('sampling'))
+        supports_effort = bool(capabilities.get('effort_levels'))
+
+        effective_temperature = None
+        effective_effort = None
+
+        if supports_sampling:
+            if manual_temperature is not None:
+                effective_temperature = manual_temperature
+                control_source = "manual (temperature)"
+            else:
+                effective_temperature = mode_params['temperature']
+                control_source = f"auto ({selected_mode})"
+        elif supports_effort:
+            if manual_effort is not None:
+                effective_effort = manual_effort
+                control_source = "manual (effort)"
+            else:
+                effective_effort = mode_params['effort']
+                if effective_effort not in capabilities['effort_levels']:
+                    effective_effort = 'high'
+                control_source = f"auto ({selected_mode})"
         else:
-            effective_temperature = mode_params['temperature']
-            temperature_source = f"auto ({selected_mode})"
-            logger.info(f"Using cognitive mode temperature: {effective_temperature} (mode: {selected_mode})")
+            # No generation controls available on this model: the prompt does
+            # all the steering.
+            control_source = f"auto ({selected_mode}, prompt only)"
+
+        depth = resolve_depth(
+            selected_mode, temperature=effective_temperature, effort=effective_effort
+        )
+        logger.info(
+            f"Generation controls: temperature={effective_temperature} "
+            f"effort={effective_effort} depth={depth} source={control_source}"
+        )
+
         
         # Get enhanced context structure
         rag_context = assemble_enhanced_context(
@@ -833,21 +1215,12 @@ def get_ai_response(user_name, prompt, manual_temperature=None):
         # Get the character prompt
         character_prompt = get_patrick_prompt()
 
-        # Add temperature-aware dynamic instructions to character prompt
-        if effective_temperature >= 0.85:
-            # High temperature: encourage expansiveness and speculation
-            temperature_guidance = "\n\nIn this moment, allow yourself to venture into bold speculation and unexpected connections. Let the response breathe and expand where the ideas demand it. Embrace creative risk."
-        elif effective_temperature <= 0.5:
-            # Low temperature: encourage focus and precision
-            temperature_guidance = "\n\nIn this moment, focus on diagnostic precision and careful observation. Be economical with words and deliberate in your analysis."
-        else:
-            # Medium temperature: balanced approach
-            temperature_guidance = "\n\nRespond with your natural voice, balancing observation with interpretation as the question warrants."
-
-        character_prompt += temperature_guidance
+        # Depth-aware dynamic instructions, driven by the resolved depth band
+        # rather than a raw temperature value.
+        character_prompt += DEPTH_GUIDANCE[depth]
 
         # Add cognitive mode-specific subtle guidance (only in Auto mode)
-        if manual_temperature is None:  # Only add mode guidance in Auto mode
+        if manual_temperature is None and manual_effort is None:
             mode_guidance_map = {
                 'survey': " The question calls for careful observation and diagnosis.",
                 'synthesis': " The question invites connection-making across domains.",
@@ -869,44 +1242,22 @@ def get_ai_response(user_name, prompt, manual_temperature=None):
 
 {user_name} asks: {prompt}"""
 
-        # Prepare API request with structured prompt and character prompt
-        response_json = api_handler.make_request(structured_prompt, system_prompt=character_prompt, temperature=effective_temperature)
-        
-        # Handle different API response formats
-        if api_handler.provider == "anthropic":
-            if isinstance(response_json, dict):
-                if "content" in response_json:
-                    response_content = response_json["content"]
-                elif "message" in response_json and "content" in response_json["message"]:
-                    response_content = response_json["message"]["content"]
-                elif "choices" in response_json and len(response_json["choices"]) > 0:
-                    response_content = response_json["choices"][0]["message"]["content"]
-                else:
-                    logger.error(f"Unexpected Anthropic response format: {response_json}")
-                    raise ValueError(f"Unexpected Anthropic API response format: {response_json}")
-            else:
-                logger.error(f"Unexpected response type: {type(response_json)}")
-                raise ValueError(f"Unexpected response type: {type(response_json)}")
-        elif api_handler.provider == "ollama":
-            if isinstance(response_json, dict) and "content" in response_json:
-                response_content = response_json["content"]
-            else:
-                raise ValueError(f"Unexpected Ollama API response format: {response_json}")
-        else:
-            raise ValueError(f"Unsupported provider: {api_handler.provider}")
-        
-        # Handle Anthropic's content block format
-        if isinstance(response_content, list):
-            # Extract text from content blocks
-            response_content = " ".join(
-                block.get("text", "") for block in response_content 
-                if isinstance(block, dict) and "text" in block
+        # Prepare API request with structured prompt and character prompt.
+        # The handler returns a normalised ModelResponse whatever the provider,
+        # so there is no response-shape guessing left to do here.
+        model_response = api_handler.make_request(
+            structured_prompt,
+            system_prompt=character_prompt,
+            temperature=effective_temperature,
+            effort=effective_effort,
+        )
+        response_content = model_response.text
+
+        if model_response.stop_reason == "max_tokens":
+            st.warning(
+                "The response was cut short by the max_tokens limit. "
+                "Raise max_tokens in MODEL_CONFIG if this keeps happening."
             )
-        
-        # Ensure response_content is a string
-        if not isinstance(response_content, str):
-            logger.error(f"Response content is not a string: {type(response_content)}")
-            response_content = str(response_content)
 
         # Parse XML-style tags if present, but don't force them
         import re
@@ -930,7 +1281,8 @@ def get_ai_response(user_name, prompt, manual_temperature=None):
         evaluation_results = st.session_state.response_evaluator.evaluate_response(
             response=answer,  # Only evaluate the answer portion
             mode=selected_mode,  # Pass the explicit mode
-            temperature=mode_params['temperature']
+            temperature=effective_temperature,
+            effort=effective_effort
         )
         logger.info(f"Evaluation results: {evaluation_results}")
         
@@ -940,18 +1292,41 @@ def get_ai_response(user_name, prompt, manual_temperature=None):
             for idx, (_, filename) in enumerate(top_chunks)
         ]
 
-        # Return temperature info along with response
-        temperature_info = {
+        # Return the generation metadata alongside the response. Token usage is
+        # carried through so the dashboard can report spend per response, not
+        # just response length.
+        generation_info = {
             'temperature': effective_temperature,
-            'source': temperature_source,
-            'mode': selected_mode
+            'effort': effective_effort,
+            'depth': depth,
+            'source': control_source,
+            'mode': selected_mode,
+            'provider': current_provider,
+            'model': current_model,
+            'usage': model_response.usage,
+            'stop_reason': model_response.stop_reason,
         }
 
-        return (reasoning, answer), unique_files, chunk_info, temperature_info
+        return (reasoning, answer), unique_files, chunk_info, generation_info
 
     except Exception as e:
         logger.error(f"Error in get_ai_response: {str(e)}")
-        return f"An unexpected error occurred: {str(e)}", [], [], {'temperature': 0.7, 'source': 'error', 'mode': 'unknown'}
+        return (
+            f"An unexpected error occurred: {str(e)}",
+            [],
+            [],
+            {
+                'temperature': None,
+                'effort': None,
+                'depth': 'balanced',
+                'source': 'error',
+                'mode': 'unknown',
+                'provider': MODEL_CONFIG['current_provider'],
+                'model': MODEL_CONFIG['providers'][MODEL_CONFIG['current_provider']]['model'],
+                'usage': {},
+                'stop_reason': None,
+            },
+        )
 
 # Initialize session state objects
 if 'cognitive_modes' not in st.session_state:
@@ -985,46 +1360,112 @@ selected_provider = st.sidebar.selectbox(
     index=list(MODEL_CONFIG["providers"].keys()).index(MODEL_CONFIG["current_provider"])
 )
 
-# Add Ollama model selection when Ollama is selected
-if selected_provider == "ollama":
-    api_handler = ModelAPIHandler(MODEL_CONFIG)
-    available_models = api_handler.get_available_ollama_models()
-    if available_models:
-        selected_model = st.sidebar.selectbox(
-            "Select Ollama Model",
-            options=available_models,
-            index=available_models.index(MODEL_CONFIG["providers"]["ollama"]["model"]) if MODEL_CONFIG["providers"]["ollama"]["model"] in available_models else 0
-        )
-        MODEL_CONFIG["providers"]["ollama"]["model"] = selected_model
-    else:
-        st.sidebar.warning("Could not fetch available Ollama models. Please ensure Ollama server is running.")
-
-# Update the current provider if changed
+# Apply the provider choice before anything reads the capabilities, so the
+# controls below describe the model that will actually be called.
 if selected_provider != MODEL_CONFIG["current_provider"]:
     MODEL_CONFIG["current_provider"] = selected_provider
     st.sidebar.success(f"Switched to {selected_provider} model")
 
-# Temperature control section
-st.sidebar.header("Temperature Control")
-temperature_mode = st.sidebar.radio(
-    "Temperature Mode",
-    options=["Auto (Cognitive Mode)", "Manual"],
-    help="Auto uses temperature based on cognitive mode (Survey: 0.7, Synthesis: 0.8, Proposition: 0.9). Manual lets you set a custom temperature."
-)
+api_handler = ModelAPIHandler(MODEL_CONFIG)
 
-if temperature_mode == "Manual":
-    manual_temperature = st.sidebar.slider(
-        "Temperature",
-        min_value=0.0,
-        max_value=1.0,
-        value=0.7,
-        step=0.05,
-        help="Higher values (0.8-1.0) = more creative/random. Lower values (0.0-0.5) = more focused/deterministic."
-    )
-    st.sidebar.caption(f"Current: {manual_temperature:.2f}")
+if selected_provider == "ollama":
+    available_models = api_handler.get_available_ollama_models()
+    if available_models:
+        current = MODEL_CONFIG["providers"]["ollama"]["model"]
+        selected_model = st.sidebar.selectbox(
+            "Select Ollama Model",
+            options=available_models,
+            index=available_models.index(current) if current in available_models else 0
+        )
+        MODEL_CONFIG["providers"]["ollama"]["model"] = selected_model
+    else:
+        st.sidebar.warning("Could not fetch available Ollama models. Please ensure Ollama server is running.")
 else:
-    manual_temperature = None
-    st.sidebar.caption("Temperature will be set automatically based on query type")
+    # Ask Anthropic what it offers rather than trusting a list baked into this
+    # file. Falls back to the static registry when the call fails or no key is
+    # configured.
+    if "discovered_anthropic_models" not in st.session_state:
+        st.session_state.discovered_anthropic_models = api_handler.get_available_anthropic_models()
+
+    discovered = st.session_state.discovered_anthropic_models
+    catalogue = discovered or ANTHROPIC_MODELS
+    model_ids = sorted(catalogue.keys())
+    current = MODEL_CONFIG["providers"]["anthropic"]["model"]
+    if current not in model_ids:
+        model_ids.insert(0, current)
+
+    def _label(model_id):
+        entry = catalogue.get(model_id, {})
+        label = entry.get("display_name") or model_id
+        return f"{label} (deprecated)" if entry.get("deprecated") else label
+
+    selected_model = st.sidebar.selectbox(
+        "Select Anthropic Model",
+        options=model_ids,
+        index=model_ids.index(current),
+        format_func=_label,
+    )
+    MODEL_CONFIG["providers"]["anthropic"]["model"] = selected_model
+
+    if not discovered:
+        st.sidebar.caption("Live model list unavailable - showing the built-in registry.")
+    if st.sidebar.button("Refresh model list"):
+        st.session_state.discovered_anthropic_models = api_handler.get_available_anthropic_models()
+        st.rerun()
+
+# Rebuild the handler so the capability read below reflects the chosen model.
+api_handler = ModelAPIHandler(MODEL_CONFIG)
+model_capabilities = api_handler.capabilities
+
+# Response depth control. Which control appears depends on what the selected
+# model accepts: current Anthropic models reject temperature and take
+# output_config.effort instead.
+st.sidebar.header("Response Depth")
+manual_temperature = None
+manual_effort = None
+
+if model_capabilities.get("sampling"):
+    temperature_mode = st.sidebar.radio(
+        "Temperature Mode",
+        options=["Auto (Cognitive Mode)", "Manual"],
+        help="Auto uses temperature based on cognitive mode (Survey: 0.7, Synthesis: 0.8, Proposition: 0.9). Manual lets you set a custom temperature."
+    )
+    if temperature_mode == "Manual":
+        manual_temperature = st.sidebar.slider(
+            "Temperature",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.7,
+            step=0.05,
+            help="Higher values (0.8-1.0) = more creative/random. Lower values (0.0-0.5) = more focused/deterministic."
+        )
+        st.sidebar.caption(f"Current: {manual_temperature:.2f}")
+    else:
+        st.sidebar.caption("Temperature will be set automatically based on query type")
+elif model_capabilities.get("effort_levels"):
+    levels = model_capabilities["effort_levels"]
+    effort_mode = st.sidebar.radio(
+        "Effort Mode",
+        options=["Auto (Cognitive Mode)", "Manual"],
+        help="Auto sets effort from the cognitive mode (Survey: medium, Synthesis: high, Proposition: xhigh). Effort controls how much the model thinks before answering."
+    )
+    if effort_mode == "Manual":
+        default_effort = MODEL_CONFIG["providers"]["anthropic"].get("effort", "high")
+        manual_effort = st.sidebar.select_slider(
+            "Effort",
+            options=levels,
+            value=default_effort if default_effort in levels else levels[-1],
+            help="Higher effort means deeper reasoning and more tokens spent."
+        )
+        st.sidebar.caption(f"Current: {manual_effort}")
+    else:
+        st.sidebar.caption("Effort will be set automatically based on query type")
+    st.sidebar.caption("This model does not accept a temperature setting.")
+else:
+    st.sidebar.caption(
+        "This model accepts no generation controls - depth is steered by the "
+        "prompt alone."
+    )
 
 # Sidebar: Data controls
 st.sidebar.header("Data Controls")
@@ -1071,10 +1512,11 @@ if st.button('Submit'):
                 csv_file, json_file = initialize_log_files()
 
                 # Get response and update logs
-                response_content, unique_files, chunk_info, temperature_info = get_ai_response(
+                response_content, unique_files, chunk_info, generation_info = get_ai_response(
                     user_name_input.strip(),
                     prompt_input.strip(),
-                    manual_temperature=manual_temperature
+                    manual_temperature=manual_temperature,
+                    manual_effort=manual_effort
                 )
                 
                 # Check for error messages in response
@@ -1094,7 +1536,7 @@ if st.button('Submit'):
                     chunk_info=chunk_info,
                     csv_file=csv_file,
                     json_file=json_file,
-                    temperature_info=temperature_info
+                    generation_info=generation_info
                 )
 
                 # Add this line to write markdown history
@@ -1154,13 +1596,15 @@ if st.button('Submit'):
                 <div class="metadata-section">
                     <p style="color: #666; margin-bottom: 5px;"><strong>📚 Sources:</strong> {}</p>
                     <p style="color: #666; margin-bottom: 5px;"><strong>🔍 Relevance:</strong> {}</p>
-                    <p style="color: #666; margin-bottom: 0;"><strong>🌡️ Temperature:</strong> {} ({})</p>
+                    <p style="color: #666; margin-bottom: 5px;"><strong>🧭 Depth:</strong> {} ({})</p>
+                    <p style="color: #666; margin-bottom: 0;"><strong>🧮 Tokens:</strong> {}</p>
                 </div>
                 """.format(
                     ' • '.join(html.escape(file) for file in unique_files),
                     ' • '.join(html.escape(chunk) for chunk in chunk_info),
-                    temperature_info['temperature'],
-                    html.escape(temperature_info['source'])
+                    html.escape(format_depth_control(generation_info)),
+                    html.escape(generation_info['source']),
+                    html.escape(format_usage(generation_info.get('usage')))
                 ), unsafe_allow_html=True)
                 
             except Exception as e:
